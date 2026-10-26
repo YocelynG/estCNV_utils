@@ -1,0 +1,786 @@
+---
+title: "CNV estimation: post-analysis"
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+    toc: true
+---
+
+```{r}
+# load libraries
+library(tidyverse)
+library(readxl)
+```
+
+## Prepare Inputs
+The following variables need to be set by the user
+```{r}
+# Final output file of estCNV.qmd: one row per sample, Run and gene (FoldChangeGene)
+fold.changes.path = "/path/fold_changes_final_output.csv"
+
+# Folder with the allele tables used in estCNV.qmd (files starting with allele_data or allele_table).
+# Used to keep, for samples in more than one run, the run with more reads
+allele.data.path = "/path/"
+
+# panel_information folder of this repository (validated_target_filter.tsv, targets_of_interest.tsv
+# and the *_amplicon_info.tsv files of each pool). Used for the read depth per gene
+panel.info.dir = "/path/panel_information/"
+
+
+# Metadata file with one row per sample (csv, tsv/txt or xlsx). Needs a sample ID column and the grouping column selected below
+metadata.path = "/path/metadata.txt"
+
+# Folder where all outputs (tables and PDFs) are saved; created if it does not exist.
+# Outputs of "Plots by Region or other" are named after location.variable (e.g. CNV_Tests_region.txt)
+output.dir = "/path/"
+
+
+# "Plots by Region or other": location = TRUE to run them, FALSE to skip them
+location = TRUE
+# Metadata column used when location = TRUE (matched case-insensitively), e.g. "region", "district", "us".
+# Its values are treated as categories, including numeric metadata values.
+location.variable = "region"
+location.order = c("North", "Centre", "South") # Optional; other values follow alphabetically
+
+# Clinical database (txt exported from the .dta) with the parasitemia (parasites/uL) of each sample, matched by NIDA
+parasitemia.path = "/path/metadata.txt"
+
+# Decimal separator in parasitemia.path: "," for e.g. 1267,19; "." for 1267.19.
+# Values must not include thousands separators.
+parasitemia.decimal.mark = ","
+
+# In the fold change vs parasitemia plot, points above this parasitemia (parasites/uL) are drawn in navy
+parasitemia.extreme = 1e9
+
+# Controls are recognised by their name (case-insensitive) and excluded from the plots
+control.pattern = "3D7|Dd2|HB3|PM2"
+
+
+# CNV expected for each gene, drawn as a dotted line in its panel:
+# duplication = fold change 2 (red), deletion = fold change 0 (blue)
+expected.cnv = tribble(
+  ~gene,  ~cnv,
+  "HRP2", "deletion",
+  "HRP3", "deletion",
+  "MDR1", "duplication",
+  "PM",   "duplication",
+  "CRT",  "duplication"
+)
+
+# One color per gene, used in the per-gene boxplots and the locus depth plot (HRP2_* groups share the HRP2 color)
+gene.colors = c(CRT = "darkgreen", HRP2 = "darksalmon", HRP3 = "darkorchid3", MDR1 = "dodgerblue4", PM = "darkgoldenrod")
+```
+
+Reading fold changes and metadata
+```{r}
+# Sample ID columns that are recognised (case-insensitive), in order of preference
+fold.changes.id.aliases = c("sample_name", "sampleid", "sample_id", "nida")
+metadata.id.aliases = c("nida", "sample_name", "sampleid", "sample_id")
+
+find_id_column <- function(data, aliases, source) {
+  found <- colnames(data)[tolower(colnames(data)) %in% aliases]
+  if (length(found) == 0) {
+    stop(source, " has no sample ID column. Expected one of: sample_name, sampleID, SampleID, sample_id, NIDA")
+  }
+  found <- found[order(match(tolower(found), aliases))][1]
+  cat(source, "sample ID column:", found, "\n")
+  found
+}
+
+read_table <- function(path) {
+  if (grepl("\\.csv$", path, ignore.case = TRUE)) {
+    read.csv(path, colClasses = "character", check.names = FALSE)
+  } else if (grepl("\\.xlsx$", path, ignore.case = TRUE)) {
+    read_xlsx(path, col_types = "text")
+  } else {
+    read.delim(path, colClasses = "character", check.names = FALSE)
+  }
+}
+
+# Convert the configured decimal format without silently discarding values.
+parse_parasitemia <- function(x, decimal.mark = parasitemia.decimal.mark) {
+  if (length(decimal.mark) != 1L || is.na(decimal.mark) || !decimal.mark %in% c(".", ",")) {
+    stop('parasitemia.decimal.mark must be "." or ","')
+  }
+  raw <- trimws(as.character(x))
+  missing <- is.na(raw) | raw %in% c("", "NA", "N/A", ".")
+  normalized <- raw
+  if (decimal.mark == ",") normalized <- gsub(",", ".", normalized, fixed = TRUE)
+  value <- suppressWarnings(as.numeric(normalized))
+  invalid <- !missing & !is.finite(value)
+  if (any(invalid)) {
+    stop("Cannot parse parasitemia values: ", paste(head(unique(raw[invalid]), 5), collapse = ", "),
+         ". Check parasitemia.decimal.mark; thousands separators are not supported.")
+  }
+  value[missing] <- NA_real_
+  value
+}
+
+# Read as text so NIDAs keep their format (e.g. 2076817.1); drop the row-number column written by write.csv
+fold.changes <- read_table(fold.changes.path)
+fold.changes <- fold.changes[nzchar(colnames(fold.changes))] %>%
+  mutate(FoldChangeGene = as.numeric(FoldChangeGene))
+metadata <- read_table(metadata.path)
+
+if (!isTRUE(location) && !isFALSE(location)) stop("location must be TRUE or FALSE")
+location.enabled <- isTRUE(location)
+location.column <- NULL
+if (location.enabled) {
+  if (!is.character(location.variable) || length(location.variable) != 1L || is.na(location.variable) ||
+      !nzchar(trimws(location.variable))) {
+    stop('location.variable must be a metadata column name, e.g. "region"')
+  }
+  matches <- names(metadata)[tolower(names(metadata)) == tolower(trimws(location.variable))]
+  if (length(matches) != 1L) {
+    stop("Grouping column not found or ambiguous: ", location.variable,
+         ". Available metadata columns: ", paste(names(metadata), collapse = ", "))
+  }
+  location.column <- matches[[1]]
+}
+
+# Output files, all in output.dir; those of "Plots by Region or other" are named after location.variable
+output.dir <- sub("/+$", "", output.dir)
+dir.create(output.dir, recursive = TRUE, showWarnings = FALSE)
+fold.changes.metadata.path <- file.path(output.dir, "fold_changes_final_metadata.txt")
+if (location.enabled) {
+  location.tag <- gsub("[^A-Za-z0-9]+", "_", trimws(location.variable))
+  region.tests.path <- file.path(output.dir, paste0("CNV_Tests_", location.tag, ".txt"))
+  boxplot.pdf.path <- file.path(output.dir, paste0("CNV_Boxplots_FoldChange_", location.tag, ".pdf"))
+  regression.pdf.path <- file.path(output.dir, paste0("CNV_Regression_FoldChange_Parasitemia_", location.tag, ".pdf"))
+}
+# Capture metadata values before joins/renaming, without overwriting original columns.
+metadata$analysis_group <- if (location.enabled) trimws(metadata[[location.column]]) else NA_character_
+
+parasitemia.db <- read_table(parasitemia.path)
+if (!"parasitemia" %in% colnames(parasitemia.db)) {
+  stop("Parasitemia database has no parasitemia column")
+}
+
+fold.changes.id <- find_id_column(fold.changes, fold.changes.id.aliases, "Fold changes")
+metadata.id <- find_id_column(metadata, metadata.id.aliases, "Metadata")
+parasitemia.id <- find_id_column(parasitemia.db, metadata.id.aliases, "Parasitemia database")
+```
+
+### Matching fold changes to metadata
+```{r}
+# Other IDs (e.g. controls such as 3D7_1K) are kept as they are
+nida_key <- function(id) {
+  id <- trimws(as.character(id))
+  parts <- str_match(id, "^N?(\\d+)(?:[-_.](\\d))?$")
+  case_when(
+    is.na(parts[, 1]) ~ id,
+    is.na(parts[, 3]) | parts[, 3] == "0" ~ parts[, 2],
+    TRUE ~ paste0(parts[, 2], ".", parts[, 3])
+  )
+}
+
+metadata <- metadata %>%
+  mutate(match_key = nida_key(.data[[metadata.id]])) %>%
+  rename(metadata_id = all_of(metadata.id))
+
+duplicated.keys <- unique(metadata$match_key[duplicated(metadata$match_key)])
+if (length(duplicated.keys) > 0) {
+  stop("Metadata has more than one row for: ", paste(head(duplicated.keys, 10), collapse = ", "))
+}
+
+# Add the parasitemia to the metadata, matched by NIDA (it replaces a parasitemia column already in the metadata).
+# All values are kept as in the database, including 0 and very high values
+parasitemia.db <- parasitemia.db %>%
+  transmute(match_key = nida_key(.data[[parasitemia.id]]),
+            parasitemia = parse_parasitemia(parasitemia))
+
+duplicated.keys <- unique(parasitemia.db$match_key[duplicated(parasitemia.db$match_key)])
+if (length(duplicated.keys) > 0) {
+  stop("Parasitemia database has more than one row for: ", paste(head(duplicated.keys, 10), collapse = ", "))
+}
+
+metadata <- metadata %>%
+  select(-any_of("parasitemia")) %>%
+  left_join(parasitemia.db, by = "match_key")
+
+fold.changes.meta <- fold.changes %>%
+  mutate(match_key = nida_key(.data[[fold.changes.id]]),
+         is_control = grepl(control.pattern, .data[[fold.changes.id]], ignore.case = TRUE)) %>%
+  left_join(metadata, by = "match_key", suffix = c("", ".metadata"))
+
+# Summary of the matching, per sample and Run
+match.summary <- fold.changes.meta %>%
+  distinct(across(any_of(c(fold.changes.id, "Run"))), is_control, matched = !is.na(metadata_id))
+unmatched <- unique(match.summary[[fold.changes.id]][!match.summary$matched & !match.summary$is_control])
+
+cat("Sample-runs in fold changes:", nrow(match.summary), "\n")
+cat("  controls (excluded):", sum(match.summary$is_control), "\n")
+cat("  samples matched to metadata:", sum(match.summary$matched & !match.summary$is_control), "\n")
+cat("  samples not matched (excluded):", sum(!match.summary$matched & !match.summary$is_control), "\n")
+if (length(unmatched) > 0) {
+  cat("  not matched:", paste(head(unmatched, 20), collapse = ", "), if (length(unmatched) > 20) "...", "\n")
+}
+if (any(match.summary$matched & match.summary$is_control)) {
+  warning("Some controls matched the metadata; they are still excluded: ",
+          paste(unique(match.summary[[fold.changes.id]][match.summary$matched & match.summary$is_control]), collapse = ", "))
+}
+if (sum(match.summary$matched) == 0) {
+  stop("No samples matched the metadata. Check the sample ID columns")
+}
+```
+
+## Calculate read deep coverage
+Reads per sample and run
+```{r}
+# Total reads of each sample in each run, from the allele tables
+files <- list.files(allele.data.path, pattern = "^allele_(data|table)", recursive = TRUE, full.names = TRUE)
+if (length(files) == 0) {
+  stop("No allele_data* or allele_table* files found in ", allele.data.path)
+}
+
+reads.per.run <- map_df(files, function(file) {
+  data <- if (grepl("\\.csv$", file, ignore.case = TRUE)) read.csv(file) else read.delim(file)
+  id <- find_id_column(data, fold.changes.id.aliases, paste("Allele table", basename(file)))
+  # Same Run and sample name rules as estCNV.qmd
+  if (!"Run" %in% colnames(data)) data$Run <- basename(dirname(file))
+  data %>%
+    transmute(match_key = nida_key(sub("_L00\\d+$", "", sub("_S\\d+(_.*)?$", "", .data[[id]]))),
+              Run,
+              reads = as.numeric(reads))
+}) %>%
+  group_by(match_key, Run) %>%
+  summarise(total_reads = sum(reads, na.rm = TRUE), .groups = "drop")
+```
+
+One value per sample
+```{r}
+# Samples that passed QC in more than one run: keep the run with more reads.
+# Only samples with metadata are kept; controls are excluded
+run.reads <- fold.changes.meta %>%
+  filter(!is.na(metadata_id), !is_control) %>%
+  distinct(metadata_id, match_key, Run) %>%
+  left_join(reads.per.run, by = c("match_key", "Run")) %>%
+  arrange(metadata_id, desc(total_reads), Run) %>%
+  group_by(metadata_id) %>%
+  mutate(n_runs = n(), selected = row_number() == 1) %>%
+  ungroup()
+
+if (any(is.na(run.reads$total_reads[run.reads$n_runs > 1]))) {
+  warning("Reads not found for some runs of samples in more than one run. Check allele.data.path")
+}
+
+fold.changes.sample <- fold.changes.meta %>%
+  semi_join(run.reads %>% filter(selected), by = c("metadata_id", "Run"))
+
+multi.run <- run.reads %>% filter(n_runs > 1)
+cat("Samples:", n_distinct(fold.changes.sample$metadata_id), "\n")
+cat("  in more than one run (run with more reads kept):", n_distinct(multi.run$metadata_id), "\n")
+if (nrow(multi.run) > 0) {
+  multi.run %>%
+    select(sample = metadata_id, Run, total_reads, selected) %>%
+    print(n = Inf)
+}
+
+sample.parasitemia <- fold.changes.sample %>% distinct(metadata_id, parasitemia)
+cat("  with parasitemia:", sum(!is.na(sample.parasitemia$parasitemia)),
+    "| without:", sum(is.na(sample.parasitemia$parasitemia)),
+    "| parasitemia = 0:", sum(sample.parasitemia$parasitemia == 0, na.rm = TRUE), "\n")
+
+if (location.enabled) {
+  cat("\nSamples by", location.column, ":\n")
+  fold.changes.sample %>%
+    distinct(metadata_id, analysis_group) %>%
+    count(analysis_group) %>%
+    print()
+}
+```
+
+
+### Fold change vs parasitemia and locus read depth, per gene
+
+Fold changes across genes, pooled across regions
+
+Each box summarizes the selected samples for one gene; points show individual
+samples. All genes share the same fold-change axis.
+
+```{r}
+#| label: fold-change-boxplots-per-gene
+#| fig-width: 10
+#| fig-height: 6
+boxplot.gene.pdf.path <- file.path(output.dir, "CNV_Boxplots_FoldChange_PerGene.pdf")
+if (length(setdiff(fold.changes.sample$gene, names(gene.colors)))) {
+  stop("Add a color in gene.colors for: ", paste(setdiff(fold.changes.sample$gene, names(gene.colors)), collapse = ", "))
+}
+boxplot.gene.data <- fold.changes.sample %>%
+  filter(is.finite(FoldChangeGene)) %>%
+  mutate(gene = factor(gene, levels = sort(unique(gene))))
+boxplot.gene.plot <- ggplot(boxplot.gene.data, aes(x = gene, y = FoldChangeGene)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_hline(yintercept = 1.5, linetype = "dashed", color = "darkred") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "navy") +
+  geom_boxplot(aes(fill = gene), outlier.shape = NA, alpha = 0.6) +
+  geom_point(position = position_jitter(width = 0.18, height = 0, seed = 123),
+             size = 0.8, alpha = 0.35) +
+  scale_fill_manual(values = gene.colors) +
+  labs(x = "Gene", y = "Fold change", title = "Fold change per gene",
+       subtitle = "Samples pooled across regions; one selected run per sample") +
+  theme_bw() +
+  theme(legend.position = "none")
+boxplot.gene.plot
+
+ggsave(boxplot.gene.pdf.path, boxplot.gene.plot, width = 10, height = 6)
+cat("Gene boxplots saved as:", boxplot.gene.pdf.path, "\n")
+```
+
+
+These plots pool samples across regions, Per-gene depth uses the loci in
+`targets_of_interest.tsv` (all groups, including HRP2_DD2). The HRP2 groups
+(HRP2_P4, HRP2_DD2, HRP2_P34) are pooled into HRP2
+
+```{r}
+#| label: fold-change-per-gene-covariates
+#| fig-width: 10
+#| fig-height: 8
+validated.target.filter.path = file.path(panel.info.dir, "validated_target_filter.tsv")
+# Loci used for the per-gene read depth (columns target_name and group)
+targets.of.interest.path = file.path(panel.info.dir, "targets_of_interest.tsv")
+parasitemia.gene.pdf.path = file.path(output.dir, "CNV_FoldChange_Parasitemia_PerGene.pdf")
+depth.panel.pdf.path = file.path(output.dir, "CNV_FoldChange_AllLociReadDepth_PerGene.pdf")
+depth.gene.pdf.path = file.path(output.dir, "CNV_FoldChange_ReadDepth_PerGene.pdf")
+depth.table.path = file.path(output.dir, "CNV_ReadDepth_PerGene.txt")
+
+amplicon.files <- list.files(panel.info.dir, pattern = "_amplicon_info\\.tsv$", recursive = TRUE, full.names = TRUE)
+if (!length(amplicon.files)) stop("Panel amplicon files are missing")
+depth.lookup <- map_dfr(amplicon.files, read.delim) %>%
+  transmute(amplicon = paste(chrom, insert_start - nchar(fwd_primer) + 1,
+                            insert_end + nchar(rev_primer), sep = "-"), target_name) %>%
+  distinct()
+if (anyDuplicated(depth.lookup$amplicon)) stop("Ambiguous amplicon-to-target mapping")
+depth.panel.targets <- read.delim(validated.target.filter.path) %>%
+  select(target_name) %>%
+  filter(target_name %in% depth.lookup$target_name) %>%
+  distinct()
+if (!nrow(depth.panel.targets)) stop("No validated panel loci found")
+# All targets of interest, with each group collapsed to its gene (HRP2_P4, HRP2_DD2, HRP2_P34 -> HRP2)
+depth.targets <- read_table(targets.of.interest.path) %>%
+  transmute(target_name = trimws(target_name), gene = sub("_.*$", "", trimws(group))) %>%
+  filter(gene %in% fold.changes.sample$gene) %>%
+  distinct()
+if (anyDuplicated(depth.targets$target_name)) stop("A depth target maps to multiple genes")
+if (length(setdiff(fold.changes.sample$gene, depth.targets$gene))) stop("Missing depth targets for a gene")
+not.in.panels <- setdiff(depth.targets$target_name, depth.lookup$target_name)
+if (length(not.in.panels)) warning("Targets of interest not in the panel amplicon files: ", paste(not.in.panels, collapse = ", "))
+
+# Sum all allele rows for each target in each sample-run, using the same ID rules
+depth.alleles <- map_dfr(files, function(file) {
+  d <- read_table(file)
+  id <- find_id_column(d, fold.changes.id.aliases, basename(file))
+  if (!"Run" %in% names(d)) d$Run <- basename(dirname(file))
+  if (!"target_name" %in% names(d)) {
+    if (!"locus" %in% names(d)) stop("No target_name or locus in ", file)
+    d$target_name <- depth.lookup$target_name[match(sub("-[^-]+$", "", d$locus), depth.lookup$amplicon)]
+  }
+  d %>% transmute(match_key = nida_key(sub("_L00\\d+$", "", sub("_S\\d+(_.*)?$", "", .data[[id]]))),
+                  Run, target_name, reads = as.numeric(reads))
+})
+if (any(!is.finite(depth.alleles$reads) | depth.alleles$reads < 0)) stop("Invalid allele read counts")
+cat("Allele rows without a panel target mapping:", sum(is.na(depth.alleles$target_name)), "\n")
+depth.observed <- depth.alleles %>%
+  filter(!is.na(target_name)) %>%
+  group_by(match_key, Run, target_name) %>%
+  summarise(target_reads = sum(reads), .groups = "drop")
+# Only complete sample-runs actually present in the input, avoiding false zero depth
+# when a whole sample-run is missing.
+depth.present <- depth.alleles %>% distinct(match_key, Run) %>%
+  semi_join(fold.changes.sample, by = c("match_key", "Run"))
+
+depth.run.targets <- depth.alleles %>%
+  filter(reads > 0) %>%
+  distinct(Run, target_name) %>%
+  inner_join(depth.targets, by = "target_name")
+depth.targets.used <- depth.run.targets %>%
+  group_by(Run, gene) %>%
+  summarise(targets = paste(sort(target_name), collapse = ", "), n = n(), .groups = "drop")
+print(knitr::kable(depth.targets.used, caption = "Targets of interest used for the locus depth, per run and gene"))
+depth.per.gene <- inner_join(depth.present, depth.run.targets, by = "Run", relationship = "many-to-many") %>%
+  left_join(depth.observed, by = c("match_key", "Run", "target_name")) %>%
+  mutate(target_reads = replace_na(target_reads, 0)) %>%
+  group_by(match_key, Run, gene) %>%
+  summarise(mean_locus_depth = mean(target_reads), total_gene_reads = sum(target_reads),
+            n_amplicons = n(), n_amplicons_with_reads = sum(target_reads > 0), .groups = "drop")
+# Complete the entire validated panel, so loci with no reads count as zero.
+# Use a fixed denominator across samples, rather than averaging detected loci only.
+depth.per.panel <- cross_join(depth.present, depth.panel.targets) %>%
+  left_join(depth.observed, by = c("match_key", "Run", "target_name")) %>%
+  mutate(target_reads = replace_na(target_reads, 0)) %>%
+  group_by(match_key, Run) %>%
+  summarise(mean_all_loci_depth = mean(target_reads), total_panel_reads = sum(target_reads),
+            n_panel_loci = n(), n_panel_loci_with_reads = sum(target_reads > 0), .groups = "drop")
+# Keep depth in the final metadata export as well.
+fold.changes.sample <- fold.changes.sample %>%
+  select(-any_of(c("mean_locus_depth", "total_gene_reads", "n_amplicons", "n_amplicons_with_reads",
+                    "mean_all_loci_depth", "total_panel_reads", "n_panel_loci", "n_panel_loci_with_reads"))) %>%
+  left_join(depth.per.gene, by = c("match_key", "Run", "gene")) %>%
+  left_join(depth.per.panel, by = c("match_key", "Run"))
+write.table(fold.changes.sample %>%
+              select(metadata_id, Run, gene, mean_locus_depth, total_gene_reads,
+                     n_amplicons, n_amplicons_with_reads, mean_all_loci_depth,
+                     total_panel_reads, n_panel_loci, n_panel_loci_with_reads),
+            depth.table.path, sep = "\t", quote = FALSE, row.names = FALSE)
+
+# Include all selected samples, even those without region; color is descriptive.
+# Zero depth is retained on a linear axis; parasitemia uses a log10 axis.
+gene.covariates <- fold.changes.sample
+region.column <- names(gene.covariates)[tolower(names(gene.covariates)) == "region"]
+gene.covariates$region <- if (length(region.column) == 1L) {
+  replace_na(as.character(gene.covariates[[region.column]]), "Unknown")
+} else "Unknown"
+for (covariate in c("parasitemia", "mean_all_loci_depth", "mean_locus_depth")) {
+  d <- gene.covariates %>%
+    filter(is.finite(FoldChangeGene), is.finite(.data[[covariate]]))
+  if (covariate == "parasitemia") d <- filter(d, parasitemia > 0)
+  counts <- gene.covariates %>% count(gene, name = "n_selected") %>%
+    left_join(count(d, gene, name = "n_plotted"), by = "gene") %>%
+    mutate(n_plotted = replace_na(n_plotted, 0L), n_excluded = n_selected - n_plotted)
+  print(knitr::kable(counts, caption = paste("Samples plotted against", covariate)))
+  p <- ggplot(d, aes(x = .data[[covariate]], y = FoldChangeGene)) +
+    geom_blank(data = counts, aes(x = NA_real_, y = NA_real_), inherit.aes = FALSE) +
+    facet_wrap(~gene, scales = "free") +
+    labs(y = "Fold change", color = "Region") +
+    theme_bw() + theme(legend.position = "bottom")
+  if (covariate == "parasitemia") {
+    # scale_x_log10 transforms x before fitting: FoldChangeGene ~ log10(parasitemia).
+    # Require enough observations and distinct x values for a regression per gene.
+    regression.gene.data <- d %>%
+      group_by(gene) %>%
+      filter(n() >= 3L, n_distinct(parasitemia) >= 2L) %>%
+      ungroup()
+    # Pearson correlation of fold change with log10(parasitemia), per gene (same scale as the line).
+    # For a simple linear regression R² = r² and the slope p-value equals the correlation p-value
+    parasitemia.stats <- regression.gene.data %>%
+      filter(n_distinct(FoldChangeGene) >= 2L, .by = gene) %>%
+      group_by(gene) %>%
+      summarise(n = n(),
+                pearson_r = cor(log10(parasitemia), FoldChangeGene),
+                p.value = cor.test(log10(parasitemia), FoldChangeGene, method = "pearson")$p.value,
+                x.label = min(parasitemia), .groups = "drop") %>%
+      mutate(r.squared = pearson_r^2,
+             label = paste0(if_else(r.squared < 0.001, "R² < 0.001", paste0("R² = ", round(r.squared, 3))),
+                            if_else(p.value < 0.001, ", p < 0.001", paste0(", p = ", signif(p.value, 2)))))
+    print(knitr::kable(parasitemia.stats %>% select(gene, n, r.squared, p.value), digits = 4,
+                       caption = "Pearson correlation of fold change with log10(parasitemia), per gene"))
+    # Extreme parasitemia (> parasitemia.extreme) in navy, with its own legend key; the gradient
+    # covers the other samples. All samples, extreme ones included, are used in the regression
+    extreme.label <- paste(">", format(parasitemia.extreme, big.mark = ",", scientific = FALSE), "parasites/uL")
+    p <- p +
+      geom_point(data = filter(d, parasitemia <= parasitemia.extreme),
+                 aes(color = parasitemia), size = 3, alpha = 0.8) +
+      geom_point(data = filter(d, parasitemia > parasitemia.extreme),
+                 aes(fill = extreme.label), shape = 21, color = "navy", size = 3, alpha = 0.8) +
+      scale_fill_manual(values = setNames("navy", extreme.label), name = NULL) +
+      geom_smooth(data = regression.gene.data, aes(group = 1),
+                  method = "lm", formula = y ~ x, se = TRUE,
+                  color = "black", fill = "gray47", alpha = 0.15, linewidth = 0.7) +
+      geom_text(data = parasitemia.stats, aes(x = x.label, y = Inf, label = label),
+                inherit.aes = FALSE, hjust = 0, vjust = 1.5, size = 3) +
+      scale_x_log10(labels = scales::label_log()) +
+      scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+      # Wider color bar with 10^x labels (as the x axis), so the gradient labels do not overlap
+      scale_color_gradient(low = "#F2D174", high = "#4FC6D6", transform = "log10",
+                           name = "Parasitemia (parasites/uL)", labels = scales::label_log(),
+                           guide = guide_colourbar(theme = theme(legend.key.width = unit(10, "cm"),
+                                                                 legend.title.position = "top"))) +
+      labs(x = "Parasitemia (parasites/uL, log10 scale)", title = "Fold change vs parasitemia, per gene",
+           subtitle = paste("R²: squared Pearson correlation, p: p-value"))
+    output.path <- parasitemia.gene.pdf.path
+  } else if (covariate == "mean_all_loci_depth") {
+    p <- p + geom_point(aes(color = region), size = 1, alpha = 0.5) +
+      labs(x = "Mean reads across all validated panel loci",
+                  title = "Fold change vs all-loci read depth, per gene")
+    output.path <- depth.panel.pdf.path
+  } else {
+    p <- p + geom_point(aes(color = gene), size = 1.5, alpha = 0.7) +
+      scale_color_manual(values = gene.colors, name = "Gene") +
+      labs(x = "Mean reads per locus (targets of interest)",
+           title = "Fold change vs locus read depth, per gene",
+           subtitle = "HRP2 pools the HRP2_P4, HRP2_DD2 and HRP2_P34 loci")
+    output.path <- depth.gene.pdf.path
+  }
+  print(p)
+  ggsave(output.path, p, width = 10, height = 8)
+  cat("Saved:", output.path, "\n")
+}
+```
+
+### Plots by Region or other
+Controlled by `location` and `location.variable` in Prepare Inputs. Set `location = TRUE`
+and choose the metadata column in `location.variable` (e.g. "region", "district", "us");
+set `location = FALSE` to skip all plots, tests and file exports in this section.
+Missing grouping values are excluded
+
+Data for the plots and tests
+```{r}
+#| eval: !expr location.enabled
+# One value per sample; only samples with a analysis_group
+plot.data <- fold.changes.sample %>%
+  filter(!is.na(analysis_group), analysis_group != "", is.finite(FoldChangeGene)) %>%
+  mutate(analysis_group = factor(analysis_group, levels = union(intersect(location.order, unique(analysis_group)), sort(unique(analysis_group)))))
+
+if (any(plot.data$is_control)) {
+  stop("Controls found in the plot data: ", paste(unique(plot.data[[fold.changes.id]][plot.data$is_control]), collapse = ", "))
+}
+
+# Expected fold change of each gene's CNV (only genes present in the data)
+cnv.values = c(duplication = 2, deletion = 0)
+if (!all(expected.cnv$cnv %in% names(cnv.values))) {
+  stop("expected.cnv$cnv must be 'duplication' or 'deletion'")
+}
+cnv.lines <- expected.cnv %>%
+  filter(gene %in% plot.data$gene) %>%
+  mutate(FoldChangeGene = cnv.values[cnv])
+```
+
+Statistical tests between selected groups, within each gene
+```{r}
+#| eval: !expr location.enabled && nrow(plot.data) > 0L
+# Each gene is analysed separately; genes are not compared with each other.
+# Kruskal-Wallis tests, within each gene, whether any analysis_group differs;
+# Dunn's test then compares each pair of groups within the gene (p-values adjusted with Holm over the analysis_group pairs)
+for (pkg in c("rstatix", "ggpubr")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) stop("Package ", pkg, " is needed: install.packages('", pkg, "')")
+}
+
+test.data <- plot.data %>%
+  group_by(gene) %>%
+  filter(n_distinct(analysis_group) >= 2L, n() > n_distinct(analysis_group),
+         n_distinct(FoldChangeGene) > 1L) %>%
+  ungroup()
+
+# Median fold change per analysis_group, to see the direction of any difference
+analysis_group.medians.long <- plot.data %>%
+  group_by(gene, analysis_group) %>%
+  summarise(median = round(median(FoldChangeGene), 2), .groups = "drop") %>%
+  mutate(analysis_group = as.character(analysis_group))
+analysis_group.medians <- analysis_group.medians.long %>%
+  pivot_wider(names_from = analysis_group, values_from = median, names_prefix = "median_")
+
+dunn.results <- tibble(gene = character(), group1 = character(), group2 = character(),
+                       p.adj = double())
+if (nrow(test.data) > 0L) {
+kruskal.results <- test.data %>%
+  group_by(gene) %>%
+  rstatix::kruskal_test(FoldChangeGene ~ analysis_group) %>%
+  ungroup() %>%
+  left_join(test.data %>%
+              group_by(gene) %>%
+              rstatix::kruskal_effsize(FoldChangeGene ~ analysis_group) %>%
+              ungroup() %>%
+              select(gene, effsize, magnitude),
+            by = "gene") %>%
+  mutate(significant = p < 0.05) %>%
+  left_join(analysis_group.medians, by = "gene") %>%
+  select(gene, n, starts_with("median_"), statistic, df, p, significant, effsize, magnitude)
+
+knitr::kable(kruskal.results, digits = 4,
+             caption = paste("Kruskal-Wallis test by", location.column, "within each gene (effsize: eta2[H])"))
+
+dunn.results <- test.data %>%
+  group_by(gene) %>%
+  rstatix::dunn_test(FoldChangeGene ~ analysis_group, p.adjust.method = "holm") %>%
+  ungroup() %>%
+  select(gene, group1, group2, n1, n2, statistic, p, p.adj, p.adj.signif)
+
+knitr::kable(dunn.results, digits = 4,
+             caption = "")
+
+# Save one table: each pair of groups per gene, with its medians and the gene's Kruskal-Wallis result
+analysis_group.tests <- dunn.results %>%
+  rename(dunn_statistic = statistic, dunn_p = p, dunn_p.adj = p.adj, dunn_p.adj.signif = p.adj.signif) %>%
+  left_join(analysis_group.medians.long %>% rename(group1 = analysis_group, median1 = median), by = c("gene", "group1")) %>%
+  left_join(analysis_group.medians.long %>% rename(group2 = analysis_group, median2 = median), by = c("gene", "group2")) %>%
+  left_join(kruskal.results %>%
+              select(gene, kruskal_statistic = statistic, kruskal_df = df, kruskal_p = p,
+                     kruskal_significant = significant, kruskal_effsize = effsize, kruskal_magnitude = magnitude),
+            by = "gene") %>%
+  relocate(median1, median2, .after = n2)
+
+write.table(analysis_group.tests, region.tests.path, sep = "\t", quote = FALSE, row.names = FALSE)
+cat(" Statistical tests between groups saved as:", region.tests.path, "\n")
+} else {
+  cat("No genes have enough variable observations across groups for statistical tests.\n")
+}
+
+```
+
+Fold change per gene and selected group
+```{r}
+#| eval: !expr location.enabled && nrow(plot.data) > 0L
+#| fig-width: 10
+#| fig-height: 8
+# Dunn's test p-values (Holm-adjusted within each gene)
+# Pairs of neighbouring groups go first and wider pairs on top
+dunn.positions <- dunn.results %>%
+  left_join(plot.data %>%
+              group_by(gene) %>%
+              summarise(y.max = max(FoldChangeGene), y.range = diff(range(FoldChangeGene)), .groups = "drop"),
+            by = "gene") %>%
+  mutate(span = abs(match(group2, levels(plot.data$analysis_group)) - match(group1, levels(plot.data$analysis_group)))) %>%
+  arrange(gene, span, match(group1, levels(plot.data$analysis_group))) %>%
+  group_by(gene) %>%
+  mutate(y.position = y.max + y.range * (0.08 + 0.12 * (row_number() - 1))) %>%
+  ungroup() %>%
+  mutate(p.label = paste("p =", signif(p.adj, 2)))
+
+# Points show every sample, so boxplot outliers are not drawn a second time
+boxplot.plot <- ggplot(plot.data, aes(x = analysis_group, y = FoldChangeGene)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_hline(data = cnv.lines, aes(yintercept = FoldChangeGene, color = cnv), linetype = "dotted", linewidth = 0.8) +
+  geom_boxplot(aes(fill = analysis_group), outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.2, size = 0.8, alpha = 0.4) +
+  facet_wrap(~gene, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  scale_color_manual(values = c(duplication = "darkred", deletion = "navy"), name = "Expected CNV") +
+  labs(x = location.column, y = "Fold change", title = paste("Fold change per gene and", location.column),
+       caption = "") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  guides(fill = "none")
+
+if (nrow(dunn.positions) > 0L) {
+  boxplot.plot <- boxplot.plot +
+    ggpubr::stat_pvalue_manual(dunn.positions, label = "p.label", tip.length = 0.01, size = 3)
+}
+boxplot.plot
+
+ggsave(boxplot.pdf.path, boxplot.plot, width = 10, height = 8)
+cat(" Boxplots saved as:", boxplot.pdf.path, "\n")
+```
+
+Fold change vs parasitemia, per gene and selected group
+```{r}
+#| eval: !expr location.enabled && nrow(plot.data) > 0L && any(is.finite(plot.data$parasitemia) & plot.data$parasitemia > 0)
+#| fig-width: 10
+#| fig-height: 13
+# Linear regression of fold change on parasitemia, for each gene and analysis_group.
+# Parasitemia spans several orders of magnitude, so it is shown on a log10 scale and the model is
+# lm(FoldChangeGene ~ log10(parasitemia)). Samples without parasitemia (NA) or with parasitemia 0 are not included
+regression.data <- plot.data %>%
+  filter(is.finite(parasitemia), parasitemia > 0)
+
+lm.results <- regression.data %>%
+  group_by(gene, analysis_group) %>%
+  group_modify(function(d, key) {
+    if (nrow(d) < 3L || n_distinct(d$parasitemia) < 2L || n_distinct(d$FoldChangeGene) < 2L) {
+      return(tibble(n = nrow(d), intercept = NA_real_, slope = NA_real_,
+                    slope_p = NA_real_, r.squared = NA_real_))
+    }
+    fit <- summary(lm(FoldChangeGene ~ log10(parasitemia), data = d))
+    tibble(n = nrow(d),
+           intercept = fit$coefficients[1, 1],
+           slope = fit$coefficients[2, 1],
+           slope_p = fit$coefficients[2, 4],
+           r.squared = fit$r.squared)
+  }) %>%
+  ungroup() %>%
+  mutate(label = paste0("R² = ", round(r.squared, 3), "\np = ", signif(slope_p, 2)))
+
+knitr::kable(lm.results %>% select(-label), digits = 4,
+             caption = paste("lm(FoldChangeGene ~ log10(parasitemia)) per gene and", location.column))
+
+regression.plot <- ggplot(regression.data, aes(x = parasitemia, y = FoldChangeGene)) +
+  geom_point(aes(color = analysis_group), size = 0.8, alpha = 0.5) +
+  geom_smooth(method = "lm", formula = y ~ x, color = "black", linewidth = 0.7) +
+  geom_text(data = lm.results, aes(x = min(regression.data$parasitemia), y = Inf, label = label),
+            hjust = 0, vjust = 1.2, size = 3) +
+  facet_grid(gene ~ analysis_group, scales = "free_y") +
+  scale_x_log10(labels = scales::label_log()) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.25))) +
+  labs(x = "Parasitemia (parasites/uL, log10 scale)", y = "Fold change",
+       title = paste("Fold change vs parasitemia, per gene and", location.column)) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+regression.plot
+
+ggsave(regression.pdf.path, regression.plot, width = 10, height = 13)
+cat(" Regression plots saved as:", regression.pdf.path, "\n")
+```
+
+
+Saving fold changes with metadata and parasitemia
+```{r}
+# One row per sample and gene (controls excluded; run with more reads for samples in more than one run).
+# Restore the metadata ID name unless it collides with a fold-change column.
+# Keep both original IDs in that case, e.g. sample_name and sample_name_metadata.
+metadata.export.id <- metadata.id
+export.existing.names <- setdiff(names(fold.changes.sample),
+                                 c("match_key", "is_control", "analysis_group", "metadata_id"))
+while (metadata.export.id %in% export.existing.names) {
+  metadata.export.id <- paste0(metadata.export.id, "_metadata")
+}
+fold.changes.metadata <- fold.changes.sample %>%
+  select(-match_key, -is_control, -analysis_group) %>%
+  rename(!!metadata.export.id := metadata_id) %>%
+  relocate(any_of(c(fold.changes.id, metadata.export.id, "Run", "gene", "FoldChangeGene", "region", "parasitemia")))
+
+# No scientific notation for large numbers (e.g. parasitemia)
+old.options <- options(scipen = 999)
+write.table(fold.changes.metadata, fold.changes.metadata.path, sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+options(old.options)
+
+cat(" Fold changes with metadata and parasitemia saved as:", fold.changes.metadata.path, "\n")
+cat(" ", nrow(fold.changes.metadata), "rows (", n_distinct(fold.changes.metadata[[metadata.export.id]]), "samples x",
+    n_distinct(fold.changes.metadata$gene), "genes ),", ncol(fold.changes.metadata), "columns\n")
+```
+
+
+Summary of samples meeting the gene-specific CNV thresholds
+
+One row per sample and gene from the selected run, with controls excluded
+Duplication: CRT, MDR1 or PM fold change >= 1.5
+Deletion: HRP2 or HRP3 fold change <= 0.5
+Samples with missing parasitemia are retained. These are threshold-based calls
+`GeneReads` is the gene's total reads in the sample
+`SampleTotalReads` is the sample's total reads across all loci in the allele table of the selected run
+`Parasitemia` contains the numeric value from `parasitemia.path` (decimal mark converted),
+with all values kept as in the database
+
+```{r}
+#| label: cnv-outlier-summary
+outlier.summary.path <- file.path(output.dir, "CNV_Outlier_Summary.txt")
+outlier.rows <- fold.changes.sample %>%
+  filter(is.finite(FoldChangeGene)) %>%
+  mutate(Type = case_when(
+    gene %in% c("CRT", "MDR1", "PM") & FoldChangeGene >= 1.5 ~ "Duplication",
+    gene %in% c("HRP2", "HRP3") & FoldChangeGene <= 0.5 ~ "Deletion",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(Type)) %>%
+  # Total reads of the sample across all loci in the selected run (from the allele tables)
+  left_join(reads.per.run, by = c("match_key", "Run")) %>%
+  arrange(gene, .data[[fold.changes.id]])
+outlier.summary <- outlier.rows %>%
+  transmute(SampleID = .data[[fold.changes.id]],
+            FoldChange = FoldChangeGene, Gene = gene,
+            GeneReads = total_gene_reads, SampleTotalReads = total_reads,
+            Parasitemia = parasitemia, Type)
+# Append original metadata columns except duplicate parasitemia fields.
+# Read the source as text to preserve IDs and metadata values exactly.
+# The leading Parasitemia column retains the clinical values/QC used in analysis.
+outlier.metadata <- read_table(metadata.path)
+outlier.metadata.keys <- nida_key(outlier.metadata[[metadata.id]])
+if (anyDuplicated(outlier.metadata.keys)) stop("Duplicate sample IDs in outlier metadata")
+outlier.metadata.index <- match(outlier.rows$match_key, outlier.metadata.keys)
+for (column in names(outlier.metadata)) {
+  if (tolower(column) %in% c("parasitemia", "parasitemia_metadata")) next
+  output.column <- column
+  # Retain colliding metadata fields without overwriting summary columns.
+  while (tolower(output.column) %in% tolower(names(outlier.summary))) {
+    output.column <- paste0(output.column, "_metadata")
+  }
+  outlier.summary[[output.column]] <- outlier.metadata[[column]][outlier.metadata.index]
+}
+
+knitr::kable(outlier.summary, digits = c(0, 3, 0, 0, 0, 2, 0, rep(0, ncol(outlier.summary) - 7)),
+             caption = "Samples meeting the gene-specific deletion or duplication thresholds")
+# Export full precision; rounding above is for display only.
+readr::write_tsv(outlier.summary, outlier.summary.path, na = "NA")
+cat(nrow(outlier.summary), "sample-gene calls across",
+    n_distinct(outlier.summary$SampleID), "samples. Saved:", outlier.summary.path, "\n")
+```
