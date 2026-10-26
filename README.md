@@ -47,8 +47,9 @@ The allele tables are used for two things:
 A CSV, TSV/TXT or Excel (`.xlsx`) file with **one row per sample**. It must have a sample ID column and contain parasitemia and location information. If `location = TRUE`, it must also have the grouping column named in `location.variable` 
 
 ### 4. Panel information (`panel.info.dir`)
+The information for panel information and target reads can be found at:  https://github.com/EPPIcenter/copy-number-variation
 
-The `panel_information/` folder bundled with this repository:
+The `panel_information/` folder bundled with the repository:
 
 ```
 panel_information/
