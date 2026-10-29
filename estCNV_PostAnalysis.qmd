@@ -17,34 +17,34 @@ library(readxl)
 The following variables need to be set by the user
 ```{r}
 # Final output file of estCNV.qmd: one row per sample, Run and gene (FoldChangeGene)
-fold.changes.path = "/path/fold_changes_final_output.csv"
+fold.changes.path ="/PATH/fold_changes_final_output.csv"
 
 # Folder with the allele tables used in estCNV.qmd (files starting with allele_data or allele_table).
 # Used to keep, for samples in more than one run, the run with more reads
-allele.data.path = "/path/"
+allele.data.path = "/PATH/"
 
 # panel_information folder of this repository (validated_target_filter.tsv, targets_of_interest.tsv
 # and the *_amplicon_info.tsv files of each pool). Used for the read depth per gene
-panel.info.dir = "/path/panel_information/"
+panel.info.dir = "/PATH/panel_information/"
 
 
 # Metadata file with one row per sample (csv, tsv/txt or xlsx). Needs a sample ID column and the grouping column selected below
-metadata.path = "/path/metadata.txt"
+metadata.path = "/PATH/metadata.txt"
 
 # Folder where all outputs (tables and PDFs) are saved; created if it does not exist.
 # Outputs of "Plots by Region or other" are named after location.variable (e.g. CNV_Tests_region.txt)
-output.dir = "/path/"
+output.dir = "/PATH/"
 
 
 # "Plots by Region or other": location = TRUE to run them, FALSE to skip them
-location = TRUE
+location = FALSE
 # Metadata column used when location = TRUE (matched case-insensitively), e.g. "region", "district", "us".
 # Its values are treated as categories, including numeric metadata values.
 location.variable = "region"
 location.order = c("North", "Centre", "South") # Optional; other values follow alphabetically
 
 # Clinical database (txt exported from the .dta) with the parasitemia (parasites/uL) of each sample, matched by NIDA
-parasitemia.path = "/path/metadata.txt"
+parasitemia.path = "/PATH/metadata.txt"
 
 # Decimal separator in parasitemia.path: "," for e.g. 1267,19; "." for 1267.19.
 # Values must not include thousands separators.
@@ -53,8 +53,24 @@ parasitemia.decimal.mark = ","
 # In the fold change vs parasitemia plot, points above this parasitemia (parasites/uL) are drawn in navy
 parasitemia.extreme = 1e9
 
-# Controls are recognised by their name (case-insensitive) and excluded from the plots
-control.pattern = "3D7|Dd2|HB3|PM2"
+# Manifest used in estCNV.qmd (sample ID, Run and CNV columns).
+# Mixtures of 3D7 with another strain are drawn only if CNV is TRUE in the manifest
+manifest.path = "/PATH/manifest.csv"
+
+# Controls are recognised by their name (case-insensitive) and excluded from the sample plots and tests
+control.pattern = "3D7|Dd2|HB3|PM2|PM4"
+
+# Controls drawn in the per-gene fold change and read depth plots, with the shape (pch) of their strain.
+# Name patterns are case-insensitive and checked in order; the first match is used (PM2_4 before PM2).
+# Mixtures of 3D7 with another strain (e.g. N3D7_PLUS_HB3_10_90) take that strain's shape
+control.shapes = tribble(
+  ~control, ~pattern,       ~pch,
+  "PM4",    "PM2[-_]4|PM4", 8,
+  "PM2",    "PM2",          18,
+  "Dd2",    "Dd2",          17,
+  "HB3",    "HB3",          15,
+  "3D7",    "3D7",          16
+)
 
 
 # CNV expected for each gene, drawn as a dotted line in its panel:
@@ -291,6 +307,46 @@ if (location.enabled) {
 }
 ```
 
+Controls drawn in the plots
+```{r}
+# Controls in all their runs, with the shape of their strain (control.shapes); they are not used in boxes or regressions.
+# Mixtures of 3D7 with another strain are drawn only if CNV is TRUE in the manifest (matched by sample and Run).
+if (!all(grepl(control.pattern, control.shapes$control, ignore.case = TRUE))) {
+  stop("control.pattern does not recognise: ",
+       paste(control.shapes$control[!grepl(control.pattern, control.shapes$control, ignore.case = TRUE)], collapse = ", "))
+}
+control.shape.values <- setNames(control.shapes$pch, control.shapes$control)
+
+manifest <- read_table(manifest.path)
+manifest.id <- find_id_column(manifest, fold.changes.id.aliases, "Manifest")
+manifest.cnv <- names(manifest)[tolower(names(manifest)) == "cnv"]
+if (!"Run" %in% names(manifest) || length(manifest.cnv) != 1L) stop("Manifest needs a Run and a CNV column")
+manifest <- manifest %>%
+  transmute(match_key = nida_key(.data[[manifest.id]]), Run,
+            manifest_cnv = as.logical(trimws(.data[[manifest.cnv]])))
+if (anyDuplicated(manifest[c("match_key", "Run")])) stop("Manifest has more than one row for a sample and Run")
+
+control.sample <- fold.changes.meta %>%
+  filter(is_control, is.finite(FoldChangeGene)) %>%
+  mutate(control_type = NA_character_)
+for (i in seq_len(nrow(control.shapes))) {
+  hit <- is.na(control.sample$control_type) &
+    grepl(control.shapes$pattern[i], control.sample[[fold.changes.id]], ignore.case = TRUE)
+  control.sample$control_type[hit] <- control.shapes$control[i]
+}
+control.sample <- control.sample %>%
+  filter(!is.na(control_type)) %>%
+  mutate(mixture = control_type != "3D7" & grepl("3D7", .data[[fold.changes.id]], ignore.case = TRUE)) %>%
+  left_join(manifest, by = c("match_key", "Run")) %>%
+  mutate(drawn = !mixture | manifest_cnv %in% TRUE)
+
+print(knitr::kable(control.sample %>%
+                     distinct(match_key, Run, .keep_all = TRUE) %>%
+                     count(control_type, mixture, manifest_cnv, drawn, name = "sample_runs"),
+                   caption = "Controls (sample-runs); mixtures are drawn only if CNV is TRUE in the manifest"))
+control.sample <- filter(control.sample, drawn)
+```
+
 
 ### Fold change vs parasitemia and locus read depth, per gene
 
@@ -315,13 +371,20 @@ boxplot.gene.plot <- ggplot(boxplot.gene.data, aes(x = gene, y = FoldChangeGene)
   geom_hline(yintercept = 1.5, linetype = "dashed", color = "darkred") +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "navy") +
   geom_boxplot(aes(fill = gene), outlier.shape = NA, alpha = 0.6) +
-  geom_point(position = position_jitter(width = 0.18, height = 0, seed = 123),
-             size = 0.8, alpha = 0.35) +
+  geom_point(aes(color = gene), position = position_jitter(width = 0.18, height = 0, seed = 123),
+             size = 1.8, alpha = 0.5) +
+  # Controls on top, not included in the boxes
+  geom_point(data = control.sample, aes(shape = control_type),
+             position = position_jitter(width = 0.18, height = 0, seed = 123), size = 1.5, color = "black") +
   scale_fill_manual(values = gene.colors) +
+  scale_color_manual(values = gene.colors) +
+  scale_shape_manual(values = control.shape.values, name = "Control") +
   labs(x = "Gene", y = "Fold change", title = "Fold change per gene",
-       subtitle = "Samples pooled across regions; one selected run per sample") +
+       subtitle = "Samples pooled across regions; one selected run per sample. Controls (black shapes) in all their runs") +
   theme_bw() +
-  theme(legend.position = "none")
+  theme(legend.position = "bottom") +
+  # Larger keys in the legend only, so the small control shapes can be told apart
+  guides(fill = "none", color = "none", shape = guide_legend(override.aes = list(size = 2.5)))
 boxplot.gene.plot
 
 ggsave(boxplot.gene.pdf.path, boxplot.gene.plot, width = 10, height = 6)
@@ -385,10 +448,11 @@ depth.observed <- depth.alleles %>%
   filter(!is.na(target_name)) %>%
   group_by(match_key, Run, target_name) %>%
   summarise(target_reads = sum(reads), .groups = "drop")
-# Only complete sample-runs actually present in the input, avoiding false zero depth
-# when a whole sample-run is missing.
+# Only complete sample-runs (samples and drawn controls) actually present in the input, avoiding
+# false zero depth when a whole sample-run is missing.
 depth.present <- depth.alleles %>% distinct(match_key, Run) %>%
-  semi_join(fold.changes.sample, by = c("match_key", "Run"))
+  semi_join(bind_rows(select(fold.changes.sample, match_key, Run), select(control.sample, match_key, Run)),
+            by = c("match_key", "Run"))
 
 depth.run.targets <- depth.alleles %>%
   filter(reads > 0) %>%
@@ -412,12 +476,16 @@ depth.per.panel <- cross_join(depth.present, depth.panel.targets) %>%
   group_by(match_key, Run) %>%
   summarise(mean_all_loci_depth = mean(target_reads), total_panel_reads = sum(target_reads),
             n_panel_loci = n(), n_panel_loci_with_reads = sum(target_reads > 0), .groups = "drop")
-# Keep depth in the final metadata export as well.
-fold.changes.sample <- fold.changes.sample %>%
-  select(-any_of(c("mean_locus_depth", "total_gene_reads", "n_amplicons", "n_amplicons_with_reads",
-                    "mean_all_loci_depth", "total_panel_reads", "n_panel_loci", "n_panel_loci_with_reads"))) %>%
-  left_join(depth.per.gene, by = c("match_key", "Run", "gene")) %>%
-  left_join(depth.per.panel, by = c("match_key", "Run"))
+# Keep depth in the final metadata export as well, and on the controls for the depth plots.
+add_depth <- function(data) {
+  data %>%
+    select(-any_of(c("mean_locus_depth", "total_gene_reads", "n_amplicons", "n_amplicons_with_reads",
+                      "mean_all_loci_depth", "total_panel_reads", "n_panel_loci", "n_panel_loci_with_reads"))) %>%
+    left_join(depth.per.gene, by = c("match_key", "Run", "gene")) %>%
+    left_join(depth.per.panel, by = c("match_key", "Run"))
+}
+fold.changes.sample <- add_depth(fold.changes.sample)
+control.sample <- add_depth(control.sample)
 write.table(fold.changes.sample %>%
               select(metadata_id, Run, gene, mean_locus_depth, total_gene_reads,
                      n_amplicons, n_amplicons_with_reads, mean_all_loci_depth,
@@ -439,6 +507,11 @@ for (covariate in c("parasitemia", "mean_all_loci_depth", "mean_locus_depth")) {
     left_join(count(d, gene, name = "n_plotted"), by = "gene") %>%
     mutate(n_plotted = replace_na(n_plotted, 0L), n_excluded = n_selected - n_plotted)
   print(knitr::kable(counts, caption = paste("Samples plotted against", covariate)))
+  # Controls only in the read depth plots; the parasitemia plot and its regression use samples only
+  control.d <- filter(control.sample, covariate != "parasitemia", is.finite(.data[[covariate]]))
+  if (covariate != "parasitemia") {
+    cat("Controls plotted against", covariate, ":", nrow(distinct(control.d, match_key, Run)), "sample-runs\n")
+  }
   p <- ggplot(d, aes(x = .data[[covariate]], y = FoldChangeGene)) +
     geom_blank(data = counts, aes(x = NA_real_, y = NA_real_), inherit.aes = FALSE) +
     facet_wrap(~gene, scales = "free") +
@@ -501,6 +574,11 @@ for (covariate in c("parasitemia", "mean_all_loci_depth", "mean_locus_depth")) {
            title = "Fold change vs locus read depth, per gene",
            subtitle = "HRP2 pools the HRP2_P4, HRP2_DD2 and HRP2_P34 loci")
     output.path <- depth.gene.pdf.path
+  }
+  # Controls on top (read depth plots)
+  if (nrow(control.d)) {
+    p <- p + geom_point(data = control.d, aes(shape = control_type), size = 2) +
+      scale_shape_manual(values = control.shape.values, name = "Control")
   }
   print(p)
   ggsave(output.path, p, width = 10, height = 8)
