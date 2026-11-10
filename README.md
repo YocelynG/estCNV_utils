@@ -7,11 +7,13 @@ The code generates plots fold changes per gene and, if you choose, compares them
 
 1. **Run `estCNV.qmd` first.** The post-analysis reads its final output, `fold_changes_final_output.csv`, and the same allele tables it used.
 3. **R packages**:
-   - `tidyverse`, `readxl`, `knitr`, `rmarkdown` (always needed)
+   - `tidyverse`, `readxl`, `knitr`, `rmarkdown`, `mgcv` (always needed; `mgcv` comes with R)
    - `rstatix`, `ggpubr` (only needed when `location = TRUE`)
+   - `Biostrings`, `pwalign` (Bioconductor; point mutations in CRT and MDR1)
 
 ```r
-install.packages(c("tidyverse", "readxl", "knitr", "rmarkdown", "rstatix", "ggpubr"))
+install.packages(c("tidyverse", "readxl", "knitr", "rmarkdown", "rstatix", "ggpubr", "BiocManager"))
+BiocManager::install(c("Biostrings", "pwalign"))
 ```
 
 ## Inputs
@@ -62,6 +64,17 @@ panel_information/
 
 In `targets_of_interest.tsv`, groups are collapsed to their gene by dropping everything after the first `_`. For example, `HRP2_P4`, `HRP2_DD2` and `HRP2_P34` all become `HRP2`.
 
+### 5. Reference sequences (no file needed)
+
+The 3D7 mRNA and protein of CRT and MDR1 (NCBI RefSeq) are included in `estCNV_PostAnalysis.qmd`, in FASTA format, in the chunk `reference-sequences` of the section *Point mutations in CRT and MDR1*:
+
+| Gene | Records |
+|------|---------|
+| CRT | XM_001348968.2 (mRNA), XP_001349004.1 (protein, 424 aa) |
+| MDR1 | XM_001351751.2 (mRNA), XP_001351787.1 (protein, 1419 aa) |
+
+The coding sequence is the part of the mRNA that translates into the protein. The script stops if no part of the mRNA does. The ASVs of the CRT and MDR1 outlier samples are aligned to the coding sequence and translated, to report the amino acid at CRT 97 and MDR1 86 (`mutation.codons`). The ASVs come from the allele tables, so these need an `asv` column and a pseudo-CIGAR column (`pseudocigar_unmasked` or `pseudo_cigar`).
+
 ## Sample ID matching
 
 The script looks for the sample ID column in each table. Column names are matched case-insensitively, and the first match in the order below is used:
@@ -81,7 +94,9 @@ Edit the **Prepare Inputs** chunk at the top of `estCNV_PostAnalysis.qmd`:
 
 ```r
 fold.changes.path = "/path/to/fold_changes_final_output.csv"
+fold.changes.groups.path = "/path/to/fold_changes_output.csv"   # Fold changes per target group, written by estCNV.qmd
 allele.data.path = "/path/to/allele_tables/"
+target.counts.path = "/path/to/target_counts_corrected.csv"   # Written by estCNV.qmd; GAM plots are skipped without it
 metadata.path = "/path/to/metadata.txt"
 parasitemia.path = "/path/to/parasitemia_db.txt"
 output.dir = "/path/to/output/"           # Created if it does not exist
@@ -97,6 +112,7 @@ output.dir = "/path/to/output/"           # Created if it does not exist
 | `control.pattern` | `"3D7\|Dd2\|HB3\|PM2"` | Regular expression (case-insensitive) that identifies control samples by name. |
 | `expected.cnv` | see the file | Expected CNV per gene, drawn as a dotted line in the group boxplots. `duplication` is drawn at fold change 2, `deletion` at 0. |
 | `gene.colors` | see the file | One color per gene. Every gene in the fold-change file needs a color, otherwise the script stops. |
+| `mutation.codons` | CRT 97, MDR1 86 | Codon (amino acid position) checked in each gene. One codon per gene; each gene needs its 3D7 sequences in the `reference-sequences` chunk. |
 
 
 ## Outputs
@@ -111,7 +127,8 @@ All files are written to `output.dir`.
 | `CNV_FoldChange_Parasitemia_PerGene.pdf` | Fold change against parasitemia (log10), per gene. |
 | `CNV_FoldChange_AllLociReadDepth_PerGene.pdf` | Fold change against mean reads across all validated loci, per gene. |
 | `CNV_FoldChange_ReadDepth_PerGene.pdf` | Fold change against mean reads across the gene's targets of interest. |
-| `CNV_Outlier_Summary.txt` | Samples and genes that pass the deletion or duplication thresholds. Columns: `SampleID`, `FoldChange`, `Gene`, `GeneReads`, `SampleTotalReads`, `Parasitemia`, `Type`, then the original metadata columns. |
+| `CNV_Outlier_Summary.txt` | Samples and genes that pass the deletion or duplication thresholds. An HRP2 deletion (called on the gene fold change) is given as three rows, `HRP2_DD2`, `HRP2_P34` and `HRP2_P4`, each with the fold change of the group from `fold_changes_output.csv`. Columns: `SampleID`, `FoldChange`, `Gene`, `GeneReads`, `GeneReadCoverage` (mean reads per locus of the gene, or of the group in the HRP2 rows), `SampleTotalReads`, `Parasitemia`, `Type`, `CodonAA_Alt/Ref`, `CodonNuc_Alt/Ref`, then the original metadata columns. `CodonAA_Alt/Ref` (amino acid at CRT 97 or MDR1 86 in the sample / in 3D7 with its position, e.g. `H/H97` or `Y/H97`, `N/N86` or `Y/N86`; `?` means it could not be read because of an indel) and `CodonNuc_Alt/Ref` (codon nucleotides in the sample / in 3D7, e.g. `CAC/CAC` or `TAC/CAC`) are filled in the CRT and MDR1 rows only, with one entry per ASV covering the codon, separated by `; ` and ordered by reads. The HTML report also lists each ASV with its reads and pseudo-CIGAR. |
+| `CNV_Outlier_GAM_Plots.pdf` | One page per sample and run of `CNV_Outlier_Summary.txt`: reads per locus (after the SuperBatch correction) against amplicon length, colored by target group, with the GAM fit of `estCNV.qmd` per pool, the threshold call(s) and the fold change of each target group. Needs `target_counts_corrected.csv`, written by `estCNV.qmd`. See [Reading the GAM plots](#reading-the-gam-plots). |
 
 When `location = TRUE`, three more files are written. Their names end with `location.variable` (e.g. `_region`):
 
@@ -120,3 +137,24 @@ When `location = TRUE`, three more files are written. Their names end with `loca
 | `CNV_Tests_<variable>.txt` | Dunn's test for each pair of groups within each gene, with the group medians and the gene's Kruskal–Wallis result. |
 | `CNV_Boxplots_FoldChange_<variable>.pdf` | Fold change per gene and group, with Dunn p-values. |
 | `CNV_Regression_FoldChange_Parasitemia_<variable>.pdf` | Fold change against log10(parasitemia), per gene and group. |
+
+## Reading the GAM plots
+
+Each page of `CNV_Outlier_GAM_Plots.pdf` shows one sample, with one panel per pool. Every point is a locus: its reads (after the SuperBatch correction) against its amplicon length. The black line is the GAM fit of `estCNV.qmd`, the reads expected at each length when there is no CNV. Gray points are the background loci used to fit it, and colored points are the targets of interest. A target group's fold change is how far its points sit from the line: 1 on the line, 2 at twice the line, 0 at zero reads. The thresholds are a fold change of at least 1.5 for a duplication (CRT, MDR1, PM) and at most 0.5 for a deletion (HRP2, HRP3).
+
+The figure below uses simulated data with the same model and colors. The dotted and dashed lines at 1.5× and 0.5× the black line are drawn here only to show the thresholds; the real plots do not have them.
+
+![Simulated GAM plots: no CNV, MDR1 duplication, HRP2 deletion and a single-locus CRT artifact](figures/GAM_plot_examples.png)
+
+| Row | What the plot shows | Call |
+|-----|---------------------|------|
+| 1. No CNV | All colored points sit inside the gray cloud, close to the line. | None: all fold changes between 0.87 and 1.29. |
+| 2. Duplication | The MDR1 points (dark blue) sit above the line, most of them around 1.5× or higher. | Duplication: MDR1 fold change 1.87. |
+| 3. Deletion | All HRP2 points (red tones) sit at 0 reads, in both pools. | Deletion: HRP2 fold change 0.00. |
+| 4. Not a real CNV | Only the single CRT locus (green) is high; every other point is on the line. | Duplication called (CRT fold change 1.74), but it rests on one locus. |
+
+When checking a call:
+
+- **A real CNV moves the whole group.** All loci of the group shift together, in every pool where the group has loci. Single loci still scatter around 2× or 0; that is normal.
+- **A group with one locus is weak evidence.** One locus can sit far from the line by chance: in row 1, with no CNV simulated, the CRT locus has fold change 1.29. Treat calls from a single locus with caution.
+- **Mixed infections fall in between.** When only some of the parasites carry a deletion, the group's points sit between 0 and the line (e.g. around 0.5×) instead of at 0.

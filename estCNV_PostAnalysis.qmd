@@ -11,30 +11,56 @@ format:
 # load libraries
 library(tidyverse)
 library(readxl)
+library(mgcv)
 ```
 
 ## Prepare Inputs
 The following variables need to be set by the user
 ```{r}
 # Final output file of estCNV.qmd: one row per sample, Run and gene (FoldChangeGene)
-fold.changes.path ="/PATH/fold_changes_final_output.csv"
+fold.changes.path= "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/HFS2023_CNV/fold_changes_final_output.csv"
+#"/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/CNV_Bernadet/fold_changes_final_output.csv"
+
+# Fold changes per target group, also written by estCNV.qmd (fold_changes_output.csv). In CNV_Outlier_Summary.txt
+# an HRP2 call is given as one row per group (HRP2_DD2, HRP2_P34, HRP2_P4) with these fold changes
+fold.changes.groups.path = "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/HFS2023_CNV/fold_changes_output.csv"
+#  "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/CNV_Bernadet/fold_changes_output.csv"
+
 
 # Folder with the allele tables used in estCNV.qmd (files starting with allele_data or allele_table).
 # Used to keep, for samples in more than one run, the run with more reads
-allele.data.path = "/PATH/"
+allele.data.path = "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/HFS2023_CNV/"
+# "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/CNV_Bernadet/"
 
 # panel_information folder of this repository (validated_target_filter.tsv, targets_of_interest.tsv
 # and the *_amplicon_info.tsv files of each pool). Used for the read depth per gene
-panel.info.dir = "/PATH/panel_information/"
+panel.info.dir = "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/panel_information/"
 
 
 # Metadata file with one row per sample (csv, tsv/txt or xlsx). Needs a sample ID column and the grouping column selected below
-metadata.path = "/PATH/metadata.txt"
+metadata.path = "/home/ygutierrez/Documents/Data_m4h/HFS23/HFS23_DB_Resistance_220326.txt"
+# "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/CNV_Bernadet/metadata.txt"
 
 # Folder where all outputs (tables and PDFs) are saved; created if it does not exist.
 # Outputs of "Plots by Region or other" are named after location.variable (e.g. CNV_Tests_region.txt)
-output.dir = "/PATH/"
+output.dir = "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/HFS2023_CNV/"
+#  "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/CNV_Bernadet/"
 
+# Clinical database (txt exported from the .dta) with the parasitemia (parasites/uL) of each sample, matched by NIDA
+parasitemia.path = "/home/ygutierrez/Documents/Data_m4h/HFS23/HFS23_DB_Resistance_220326.txt"
+# "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/CNV_Bernadet/metadata.txt"
+
+# Manifest used in estCNV.qmd (sample ID, Run and CNVControl columns). CNVControl is Sample (field samples),
+# Positive (Dd2, HB3, PM2 and PM4 controls) or Negative (3D7 control), in any case.
+# Mixtures of 3D7 with another strain are drawn only if CNVControl is Positive in the manifest
+manifest.path = "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/HFS2023_CNV/manifest.csv"
+# "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/CNV_Bernadet/manifest.csv"
+
+
+# Reads per target written by estCNV.qmd (target_counts_corrected.csv, next to its fold changes).
+# Used for the GAM plots of the samples in CNV_Outlier_Summary.txt; the plots are skipped if the file does not exist
+target.counts.path = "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/HFS2023_CNV/target_counts_corrected.csv"
+#  "/home/ygutierrez/Documents/CNV_m4h/CNV_m4h_2026/CNV_Bernadet/target_counts_corrected.csv"
 
 # "Plots by Region or other": location = TRUE to run them, FALSE to skip them
 location = FALSE
@@ -43,19 +69,12 @@ location = FALSE
 location.variable = "region"
 location.order = c("North", "Centre", "South") # Optional; other values follow alphabetically
 
-# Clinical database (txt exported from the .dta) with the parasitemia (parasites/uL) of each sample, matched by NIDA
-parasitemia.path = "/PATH/metadata.txt"
-
 # Decimal separator in parasitemia.path: "," for e.g. 1267,19; "." for 1267.19.
 # Values must not include thousands separators.
 parasitemia.decimal.mark = ","
 
 # In the fold change vs parasitemia plot, points above this parasitemia (parasites/uL) are drawn in navy
 parasitemia.extreme = 1e9
-
-# Manifest used in estCNV.qmd (sample ID, Run and CNV columns).
-# Mixtures of 3D7 with another strain are drawn only if CNV is TRUE in the manifest
-manifest.path = "/PATH/manifest.csv"
 
 # Controls are recognised by their name (case-insensitive) and excluded from the sample plots and tests
 control.pattern = "3D7|Dd2|HB3|PM2|PM4"
@@ -86,6 +105,20 @@ expected.cnv = tribble(
 
 # One color per gene, used in the per-gene boxplots and the locus depth plot (HRP2_* groups share the HRP2 color)
 gene.colors = c(CRT = "darkgreen", HRP2 = "darksalmon", HRP3 = "darkorchid3", MDR1 = "dodgerblue4", PM = "darkgoldenrod")
+
+# One color per target group in the GAM plots of the samples in CNV_Outlier_Summary.txt (as in estCNV.qmd);
+# NONE are the loci outside the targets of interest
+group.colors = c(NONE = "darkgray", HRP2_DD2 = "darksalmon", HRP2_P4 = "firebrick4", HRP2_P34 = "firebrick3",
+                 HRP3_P34 = "darkorchid3", MDR1 = "dodgerblue4", PM = "darkgoldenrod", CRT = "darkgreen")
+
+# Point mutations reported in the CRT and MDR1 rows of CNV_Outlier_Summary.txt: the amino acid position (codon) checked
+# in each gene. The ASVs of the samples are aligned to the 3D7 coding sequence of the gene and translated; the 3D7 mRNA
+# and protein are in the chunk "3D7 reference sequences" (section Point mutations in CRT and MDR1)
+mutation.codons = tribble(
+  ~gene,  ~codon,
+  "CRT",  97,
+  "MDR1", 86
+)
 ```
 
 Reading fold changes and metadata
@@ -310,7 +343,7 @@ if (location.enabled) {
 Controls drawn in the plots
 ```{r}
 # Controls in all their runs, with the shape of their strain (control.shapes); they are not used in boxes or regressions.
-# Mixtures of 3D7 with another strain are drawn only if CNV is TRUE in the manifest (matched by sample and Run).
+# Mixtures of 3D7 with another strain are drawn only if CNVControl is Positive in the manifest (matched by sample and Run).
 if (!all(grepl(control.pattern, control.shapes$control, ignore.case = TRUE))) {
   stop("control.pattern does not recognise: ",
        paste(control.shapes$control[!grepl(control.pattern, control.shapes$control, ignore.case = TRUE)], collapse = ", "))
@@ -319,11 +352,16 @@ control.shape.values <- setNames(control.shapes$pch, control.shapes$control)
 
 manifest <- read_table(manifest.path)
 manifest.id <- find_id_column(manifest, fold.changes.id.aliases, "Manifest")
-manifest.cnv <- names(manifest)[tolower(names(manifest)) == "cnv"]
-if (!"Run" %in% names(manifest) || length(manifest.cnv) != 1L) stop("Manifest needs a Run and a CNV column")
+manifest.cnv <- names(manifest)[tolower(names(manifest)) == "cnvcontrol"]
+if (!"Run" %in% names(manifest) || length(manifest.cnv) != 1L) stop("Manifest needs a Run and a CNVControl column")
+# CNVControl must be Sample, Positive or Negative (any case), as in estCNV.qmd
 manifest <- manifest %>%
   transmute(match_key = nida_key(.data[[manifest.id]]), Run,
-            manifest_cnv = as.logical(trimws(.data[[manifest.cnv]])))
+            manifest_cnv = str_to_title(trimws(.data[[manifest.cnv]])))
+if (!all(manifest$manifest_cnv %in% c("Sample", "Positive", "Negative"))) {
+  stop("CNVControl must contain only Sample, Positive or Negative values. Found: ",
+       paste(setdiff(unique(manifest$manifest_cnv), c("Sample", "Positive", "Negative")), collapse = ", "))
+}
 if (anyDuplicated(manifest[c("match_key", "Run")])) stop("Manifest has more than one row for a sample and Run")
 
 control.sample <- fold.changes.meta %>%
@@ -338,12 +376,12 @@ control.sample <- control.sample %>%
   filter(!is.na(control_type)) %>%
   mutate(mixture = control_type != "3D7" & grepl("3D7", .data[[fold.changes.id]], ignore.case = TRUE)) %>%
   left_join(manifest, by = c("match_key", "Run")) %>%
-  mutate(drawn = !mixture | manifest_cnv %in% TRUE)
+  mutate(drawn = !mixture | manifest_cnv %in% "Positive")
 
 print(knitr::kable(control.sample %>%
                      distinct(match_key, Run, .keep_all = TRUE) %>%
                      count(control_type, mixture, manifest_cnv, drawn, name = "sample_runs"),
-                   caption = "Controls (sample-runs); mixtures are drawn only if CNV is TRUE in the manifest"))
+                   caption = "Controls (sample-runs); mixtures are drawn only if CNVControl is Positive in the manifest"))
 control.sample <- filter(control.sample, drawn)
 ```
 
@@ -353,7 +391,7 @@ control.sample <- filter(control.sample, drawn)
 Fold changes across genes, pooled across regions
 
 Each box summarizes the selected samples for one gene; points show individual
-samples. All genes share the same fold-change axis.
+samples
 
 ```{r}
 #| label: fold-change-boxplots-per-gene
@@ -420,12 +458,12 @@ depth.panel.targets <- read.delim(validated.target.filter.path) %>%
   filter(target_name %in% depth.lookup$target_name) %>%
   distinct()
 if (!nrow(depth.panel.targets)) stop("No validated panel loci found")
-# All targets of interest, with each group collapsed to its gene (HRP2_P4, HRP2_DD2, HRP2_P34 -> HRP2)
+# All targets of interest, with their group and the gene of the group (HRP2_P4, HRP2_DD2, HRP2_P34 -> HRP2)
 depth.targets <- read_table(targets.of.interest.path) %>%
-  transmute(target_name = trimws(target_name), gene = sub("_.*$", "", trimws(group))) %>%
+  transmute(target_name = trimws(target_name), group = trimws(group), gene = sub("_.*$", "", group)) %>%
   filter(gene %in% fold.changes.sample$gene) %>%
   distinct()
-if (anyDuplicated(depth.targets$target_name)) stop("A depth target maps to multiple genes")
+if (anyDuplicated(depth.targets$target_name)) stop("A depth target maps to more than one group")
 if (length(setdiff(fold.changes.sample$gene, depth.targets$gene))) stop("Missing depth targets for a gene")
 not.in.panels <- setdiff(depth.targets$target_name, depth.lookup$target_name)
 if (length(not.in.panels)) warning("Targets of interest not in the panel amplicon files: ", paste(not.in.panels, collapse = ", "))
@@ -462,12 +500,19 @@ depth.targets.used <- depth.run.targets %>%
   group_by(Run, gene) %>%
   summarise(targets = paste(sort(target_name), collapse = ", "), n = n(), .groups = "drop")
 print(knitr::kable(depth.targets.used, caption = "Targets of interest used for the locus depth, per run and gene"))
-depth.per.gene <- inner_join(depth.present, depth.run.targets, by = "Run", relationship = "many-to-many") %>%
+# Reads of each target of interest in each sample-run (0 if the target has no reads in the sample)
+depth.target.reads <- inner_join(depth.present, depth.run.targets, by = "Run", relationship = "many-to-many") %>%
   left_join(depth.observed, by = c("match_key", "Run", "target_name")) %>%
-  mutate(target_reads = replace_na(target_reads, 0)) %>%
+  mutate(target_reads = replace_na(target_reads, 0))
+depth.per.gene <- depth.target.reads %>%
   group_by(match_key, Run, gene) %>%
   summarise(mean_locus_depth = mean(target_reads), total_gene_reads = sum(target_reads),
             n_amplicons = n(), n_amplicons_with_reads = sum(target_reads > 0), .groups = "drop")
+# Same depth per target group, without pooling the groups of a gene (HRP2_P4, HRP2_DD2 and HRP2_P34
+# separately); used in the CNV threshold summary
+depth.per.group <- depth.target.reads %>%
+  group_by(match_key, Run, gene, group) %>%
+  summarise(mean_locus_depth = mean(target_reads), total_group_reads = sum(target_reads), .groups = "drop")
 # Complete the entire validated panel, so loci with no reads count as zero.
 # Use a fixed denominator across samples, rather than averaging detected loci only.
 depth.per.panel <- cross_join(depth.present, depth.panel.targets) %>%
@@ -813,16 +858,17 @@ Summary of samples meeting the gene-specific CNV thresholds
 One row per sample and gene from the selected run, with controls excluded
 Duplication: CRT, MDR1 or PM fold change >= 1.5
 Deletion: HRP2 or HRP3 fold change <= 0.5
-Samples with missing parasitemia are retained. These are threshold-based calls
-`GeneReads` is the gene's total reads in the sample
+`GeneReads` is the total reads of the gene in the sample (of the group, in the HRP2 rows) and `GeneReadCoverage`
+its mean reads per locus (targets of interest of the selected run, as in the locus depth plot)
 `SampleTotalReads` is the sample's total reads across all loci in the allele table of the selected run
-`Parasitemia` contains the numeric value from `parasitemia.path` (decimal mark converted),
-with all values kept as in the database
+`CodonAA_Alt/Ref` and `CodonNuc_Alt/Ref` give the amino acid and the codon at CRT 97 and MDR1 86 (sample/3D7)
+in the CRT and MDR1 rows, described in [Point mutations in CRT and MDR1](#point-mutations-in-crt-and-mdr1)
 
 ```{r}
 #| label: cnv-outlier-summary
 outlier.summary.path <- file.path(output.dir, "CNV_Outlier_Summary.txt")
-outlier.rows <- fold.changes.sample %>%
+# Calls on the gene fold changes (HRP2: maximum of HRP2_P4 and HRP2_P34, as in estCNV.qmd)
+outlier.genes <- fold.changes.sample %>%
   filter(is.finite(FoldChangeGene)) %>%
   mutate(Type = case_when(
     gene %in% c("CRT", "MDR1", "PM") & FoldChangeGene >= 1.5 ~ "Duplication",
@@ -831,13 +877,420 @@ outlier.rows <- fold.changes.sample %>%
   )) %>%
   filter(!is.na(Type)) %>%
   # Total reads of the sample across all loci in the selected run (from the allele tables)
-  left_join(reads.per.run, by = c("match_key", "Run")) %>%
-  arrange(gene, .data[[fold.changes.id]])
+  left_join(reads.per.run, by = c("match_key", "Run"))
+
+# Genes with more than one target group (HRP2): a called gene is given as one row per group
+# (HRP2_DD2, HRP2_P34, HRP2_P4) with the fold change of the group and its reads and read coverage
+split.genes <- depth.targets %>% distinct(gene, group) %>% count(gene) %>% filter(n > 1L) %>% pull(gene)
+fold.changes.groups <- read_table(fold.changes.groups.path)
+fold.changes.groups <- fold.changes.groups[nzchar(colnames(fold.changes.groups))]
+fold.changes.groups.id <- find_id_column(fold.changes.groups, fold.changes.id.aliases, "Group fold changes")
+fold.changes.groups <- fold.changes.groups %>%
+  transmute(!!fold.changes.id := .data[[fold.changes.groups.id]], Run, group,
+            FoldChangeGroup = as.numeric(FoldChangeGroup), gene = sub("_.*$", "", group)) %>%
+  filter(gene %in% split.genes)
+# Calls without group fold changes (e.g. files from different estCNV.qmd runs) are kept as the gene
+missing.groups <- outlier.genes %>%
+  filter(gene %in% split.genes) %>%
+  anti_join(fold.changes.groups, by = c(fold.changes.id, "Run", "gene"))
+if (nrow(missing.groups)) {
+  warning("No group fold changes in ", basename(fold.changes.groups.path), " for (kept as the gene): ",
+          paste(missing.groups[[fold.changes.id]], missing.groups$Run, collapse = ", "))
+}
+group.rows <- outlier.genes %>%
+  filter(gene %in% split.genes) %>%
+  select(-mean_locus_depth, -total_gene_reads) %>%
+  inner_join(fold.changes.groups, by = c(fold.changes.id, "Run", "gene"), relationship = "one-to-many") %>%
+  left_join(depth.per.group %>% select(match_key, Run, group, mean_locus_depth, total_gene_reads = total_group_reads),
+            by = c("match_key", "Run", "group")) %>%
+  mutate(gene = group, FoldChangeGene = FoldChangeGroup)
+outlier.rows <- outlier.genes %>%
+  filter(!gene %in% split.genes) %>%
+  bind_rows(missing.groups, group.rows) %>%
+  arrange(sub("_.*$", "", gene), .data[[fold.changes.id]], gene)
+
+cat(nrow(outlier.genes), "sample-gene calls across", n_distinct(outlier.rows[[fold.changes.id]]), "samples;",
+    nrow(outlier.rows), "rows with the HRP2 groups\n")
+```
+
+### Point mutations in CRT and MDR1
+
+For the CRT and MDR1 rows of the summary, the ASVs of the sample (selected run) are aligned to the 3D7 coding
+sequence of the gene and translated, to report the amino acid at the codon in `mutation.codons` (CRT 97, MDR1 86)
+The 3D7 mRNA and protein of each gene are in the chunk below; the coding sequence is the part of the mRNA that
+translates into the protein. Sequences obtained from NCBI database
+
+3D7 reference sequences, in FASTA format (NCBI RefSeq): CRT mRNA XM_001348968.2 and protein XP_001349004.1;
+MDR1 mRNA XM_001351751.2 and protein XP_001351787.1
+To check another gene, add its mRNA (or CDS) and protein here, under the gene name, and its codon to `mutation.codons`
+
+```{r}
+#| label: reference-sequences
+reference.sequences = list(
+  CRT = r"(
+>XM_001348968.2 Plasmodium falciparum 3D7 chloroquine resistance transporter (CRT), mRNA
+ACTTTCGATTGTTCATTCTGTTTATTGTATAAATATATAAATATATATATATTGTATATTTTATTACATA
+TATTTTTTTTTTTTGAAAGTTAAGAATTTTAACTTAATAAAAAAAGTACATATATTTTTAATAAATGTCC
+TCCATTATATAAATTGTTATATAAAAGATTTTATATAATTTAAATAGAATTCATTTATAAACAAATTTGT
+TTATAAAAATATATTTATGTATATATAATATAAATATATATATTTATATATATATATATATATATATATT
+ACTATATATATTTTTTTTTTTTTTTCCTTTTTTTTACTTTCCCAAGTTGTACTGCTTCTAAGCTTTTTTT
+AATAAACATATATATAATTTGTACAAATATTTTAGATTATATACATGATGTATATTTGAATATATTTTCT
+ATATATTTGTGGTTCCATTTTTGTATATTATATATAATATATTTATATATATATTGATATGTCAATATTT
+GTATAACACATGAAGTTTTTGTTTTTTTTTTTTTTTTTTTTTTAATGGAGAATATTTAATAATATATGAA
+AAAAATTTTATATAAATATATATATATATATATATATATATATATATATATATGTATATATATTTATATA
+TACATGTATGTTTTTTAAAAAGTTAAATAATTCTATAGATTATTTTCATTGTCTTCCACATATATGACAT
+AAATATTTTAAAATCGACATTCCGATATATTATATTTTTAGACTATAATATCCGTTAATAATAAATACAC
+GCAGTCATATTATTTATTATACATTCATTTATTATTTTGTTTTTTTTAATTTCTTACATATAACAAAATG
+AAATTCGCAAGTAAAAAAAATAATCAAAAAAATTCAAGCAAAAATGACGAGCGTTATAGAGAATTAGATA
+ATTTAGTACAAGAAGGAAATGGCTCACGTTTAGGTGGAGGTTCTTGTCTTGGTAAATGTGCTCATGTGTT
+TAAACTTATTTTTAAAGAGATTAAGGATAATATTTTTATTTATATTTTAAGTATTATTTATTTAAGTGTA
+TGTGTAATGAATAAAATTTTTGCTAAAAGAACTTTAAACAAAATTGGTAACTATAGTTTTGTAACATCCG
+AAACTCACAACTTTATTTGTATGATTATGTTCTTTATTGTTTATTCCTTATTTGGAAATAAAAAGGGAAA
+TTCAAAAGAACGACACCGAAGCTTTAATTTACAATTTTTTGCTATATCCATGTTAGATGCCTGTTCAGTC
+ATTTTGGCCTTCATAGGTCTTACAAGAACTACTGGAAATATCCAATCATTTGTTCTTCAATTAAGTATTC
+CTATTAATATGTTCTTCTGCTTTTTAATATTAAGATATAGATATCACTTATACAATTATCTCGGAGCAGT
+TATTATTGTTGTAACAATAGCTCTTGTAGAAATGAAATTATCTTTTGAAACACAAGAAGAAAATTCTATC
+ATATTTAATCTTGTCTTAATTAGTGCCTTAATTCCTGTATGCTTTTCAAACATGACAAGGGAAATAGTTT
+TTAAAAAATATAAGATTGACATTTTAAGATTAAATGCTATGGTATCCTTTTTCCAATTGTTCACTTCTTG
+TCTTATATTACCTGTATACACCCTTCCATTTTTAAAACAACTTCATTTACCATATAATGAAATATGGACA
+AATATAAAAAATGGTTTCGCATGTTTATTCTTGGGAAGAAACACAGTCGTAGAGAATTGTGGTCTTGGTA
+TGGCTAAGTTATGTGATGATTGTGACGGAGCATGGAAAACCTTCGCATTGTTTTCCTTCTTTAACATTTG
+TGATAATTTAATAACCAGCTATATTATCGACAAATTTTCTACCATGACATATACTATTGTTAGTTGTATA
+CAAGGTCCAGCAATAGCAATTGCTTATTACTTTAAATTCTTAGCCGGTGATGTTGTAAGAGAACCAAGAT
+TATTAGATTTCGTAACTTTGTTTGGCTACCTATTTGGTTCTATAATTTACCGTGTAGGAAATATTATCTT
+AGAAAGAAAAAAAATGAGAAATGAAGAAAATGAAGATTCCGAAGGAGAATTAACCAACGTCGATTCAATT
+ATTACACAATAAAATTATATCATTTATTTTTTTATA
+>XP_001349004.1 chloroquine resistance transporter [Plasmodium falciparum 3D7]
+MKFASKKNNQKNSSKNDERYRELDNLVQEGNGSRLGGGSCLGKCAHVFKLIFKEIKDNIFIYILSIIYLS
+VCVMNKIFAKRTLNKIGNYSFVTSETHNFICMIMFFIVYSLFGNKKGNSKERHRSFNLQFFAISMLDACS
+VILAFIGLTRTTGNIQSFVLQLSIPINMFFCFLILRYRYHLYNYLGAVIIVVTIALVEMKLSFETQEENS
+IIFNLVLISALIPVCFSNMTREIVFKKYKIDILRLNAMVSFFQLFTSCLILPVYTLPFLKQLHLPYNEIW
+TNIKNGFACLFLGRNTVVENCGLGMAKLCDDCDGAWKTFALFSFFNICDNLITSYIIDKFSTMTYTIVSC
+IQGPAIAIAYYFKFLAGDVVREPRLLDFVTLFGYLFGSIIYRVGNIILERKKMRNEENEDSEGELTNVDS
+IITQ
+)",
+  MDR1 = r"(
+>XM_001351751.2 Plasmodium falciparum 3D7 ABC transporter ATP-binding protein (MDR1), mRNA
+AAAAAAAAAAAAAAAATATTATTATACATAGATTATTTTATATATATGTTTATATAATATATTTTTTTTT
+AATTTTAATATTCATATATATTTTTATTTATAATTTTTAATATATTTTTTTTAAATATAAAAAAATAAAA
+AATATATTTGTATTTTATATATTTTTTTTAATATAATATATATTTCTTATAAAATATATATTATTATTTT
+ATCAAAAAAAAAAAAAAATTCTTATGACAAACAAAAAGAAAAAAATATATTATATTTATATATAATATAA
+TTAATTTAGAACGATTTAAAAAAAAAAAAAACAAAAGAACCTTTTTTTTTTTTTTTTTGTTTGTTCGGAA
+GAATTATATATATATATATATATATATATAATAGATTATACAATATTTTTACGATAATAATATAAAACAA
+TAAAATTTTATATTAATGCTATATAATATATATTATTTATATATATTTATATAGTATATTATTTTTTTAT
+ATATAGGATTTTTTTCTCAAATATCCTATAAATACCTTGAGTAAAAAAAAATTAGAAAAATAAAAAAATG
+CGCTGACTTTATGTTATATATATATATATATATATATATATATATATATTTATATATATACATAAATGAT
+ATATATTTTTTTTTATATATTTGAGTAATAAAAATATACATATATTTTACTACGTTTATATATATATTTA
+TTTATATTTATATATATATTTGTTAAAAAGCCTTTATCTATATTACATTTTGCACCTTCAATTATAATAT
+AAATAATATATATATATATATATATATATATATATATATATATATTTATATATGTAATATATTTATTTTT
+TTATATTATACTTATAAAATATAAAAGCATATTTATAATATTTTGTATTATATTTTGTTATATAAAATAA
+CATAAATATAATATATAATCGTATATATATAATATATTATATATATATATTTTTTTTTTTTTGGAGTACA
+TGTTTATAACATAATATTCTTACAAATAAATAAATACGTATGTGAGCTATTTTATTTTATTTTTTTTTTT
+TTTATGATTTCATAGATAATTATATATATCATATAAGTATATACATGAAATATAATATATACATGAAATA
+TAATATATACATGTATATATATATATATATATATAGATGTATAAAATGAAATAATATTAACATTAAAAGA
+TTATTATATATGTATAGTTATTATAATATTTTCGTATATGTGTGTATTCATAAAATAATAATAAAAAATG
+GAAGAATAAAATAACTATTATATTTAATTATTTTGTTATTATATTTTTCATTTTTACTGATTCCTTTAAA
+AGGCATATTTATATATATATAAATATATATATATATTAAATATATTTTAACATGGATATAGAAAGAAAAA
+TGGAAGAATAAATTATATATATTTATACACTTATATAACATATTGATAAAATATACATAATTAAATATAA
+AAATGACATTATATTTTTGTTAAATTATACAGAAGAAAAAAAAAAAAAAAAAAAATAGAAGTAAATTGTA
+TAGAATTATTTTTTTATTAATATTATTATTTTATTTTGAATAAAACTATTTTTGTATCTAATAATAAATA
+TAATAACACATATATATATATATATATATATATATATATATTATTTTATTTATTATTATATTTTTTTTTT
+TATTATTTTTTTTGTCATTGTGTAAATATATAAATATATATATTATATATATATTATTATTTCAACATTG
+TTTATATATATATATATATATATATATATTTATATTTATATATTGATATATGTGTACATAGCTTATTTCA
+TTTATAAGATTTAGATTTTGTTTTTAATATTATATAATTTTGTTTGTTACAAATTAATTAATTATTTCTT
+TATTTCTTTATTTTATTTACATTTTATTTGATTTTGTGTTGAAAGATGGGTAAAGAGCAGAAAGAGAAAA
+AAGATGGTAACCTCAGTATCAAAGAAGAGGTTGAAAAAGAGTTGAACAAAAAGAGTACCGCTGAATTATT
+TAGAAAAATAAAGAATGAGAAAATATCATTTTTTTTACCGTTTAAATGTTTACCTGCACAACATAGAAAA
+TTATTATTTATATCATTTGTATGTGCTGTATTATCAGGAGGAACATTACCTTTTTTTATATCTGTGTTTG
+GTGTAATATTAAAGAACATGAATTTAGGTGATGATATTAATCCTATAATATTATCATTAGTATCTATAGG
+TTTAGTACAATTTATATTATCAATGATATCAAGTTATTGTATGGATGTAATTACATCAAAAATATTAAAA
+ACTTTAAAGCTTGAATATTTAAGAAGTGTTTTTTATCAAGATGGACAATTTCATGATAATAATCCTGGAT
+CTAAATTAAGATCTGATTTAGATTTTTATTTAGAACAAGTGAGTTCAGGAATTGGTACGAAATTTATAAC
+AATTTTTACATATGCCAGTTCCTTTTTAGGTTTATATATTTGGTCATTAATAAAAAATGCACGTTTGACT
+TTATGTATTACTTGCGTTTTTCCGTTAATTTATGTTTGTGGTGTCATATGTAATAAGAAAGTAAAATTAA
+ATAAAAAAACATCTTTGTTATATAATAACAATACCATGTCCATTATAGAAGAGGCTTTAATGGGAATAAG
+AACTGTTGCAAGTTATTGTGGAGAAAAGACTATATTAAACAAATTTAATTTGTCCGAAACTTTTTATAGT
+AAATATATTTTAAAAGCTAATTTTGTAGAAGCATTACATATAGGTTTAATAAATGGTTTAATTTTAGTTT
+CTTATGCATTCGGTTTTTGGTATGGTACAAGAATTATTATAAATAGTGCAACGAATCAATACCCCAATAA
+TGATTTTAATGGTGCCTCAGTTATATCCATTTTATTAGGTGTACTTATTAGTATGTTTATGTTAACAATT
+ATCTTACCAAATATAACAGAATATATGAAAGCTTTAGAAGCAACAAATAGTTTATATGAAATAATAAATC
+GAAAACCATTAGTTGAAAATAATGATGATGGAGAAACATTACCAAATATTAAAAAAATTGAATTTAAAAA
+TGTAAGATTTCATTATGATACTAGAAAAGATGTTGAAATTTATAAAGATTTAAGTTTTACTCTAAAAGAA
+GGGAAAACATATGCATTTGTGGGAGAATCAGGTTGTGGGAAATCAACCATACTAAAATTAATTGAAAGAC
+TTTATGATCCAACCGAAGGAGATATTATTGTAAATGATTCTCATAATTTAAAAGATATTAATTTGAAATG
+GTGGAGATCAAAAATTGGAGTTGTTAGTCAAGATCCATTATTATTTAGTAATTCAATTAAAAATAATATT
+AAATATAGTTTATATAGTTTAAAAGATTTAGAAGCAATGGAAAATTATTATGAAGAAAATACTAATGATA
+CATATGAAAATAAAAATTTTTCTTTAATTTCGAATTCTATGACATCAAATGAATTATTAGAAATGAAAAA
+AGAATATCAAACTATTAAAGATTCTGATGTTGTTGATGTGTCCAAAAAAGTACTTATACATGATTTTGTA
+TCATCATTACCAGATAAATATGATACCTTAGTAGGTTCCAATGCATCCAAATTATCAGGTGGACAAAAAC
+AAAGAATATCCATTGCAAGAGCAATTATGAGAAATCCTAAAATTCTAATTCTTGATGAAGCTACATCTTC
+TTTAGATAATAAATCTGAGTATTTAGTACAAAAAACAATTAATAATTTGAAAGGAAATGAAAATAGAATA
+ACTATTATTATAGCACATAGATTAAGTACTATAAGATATGCCAATACAATTTTTGTTTTATCAAATAGAG
+AAAGAAGTGATAATAATAATAATAATAATAATGATGATAATAATAATAATAATAATAATAATAATAACAA
+AATTAATAATGAGGGTAGCTATATTATTGAACAAGGTACACATGATAGTCTTATGAAAAATAAAAATGGT
+ATTTATCATCTTATGATAAATAATCAAAAGATTTCATCAAATAAATCTTCAAATAATGGAAATGATAATG
+GATCGGATAACAAAAGTAGCGCTTATAAAGACTCAGATACAGGTAATGATGCAGATAATATGAATAGTTT
+ATCAATACATGAAAATGAAAATATATCAAATAATCGTAATTGTAAAAATACAGCAGAAAATGAAAAAGAA
+GAGAAAGTTCCATTTTTCAAAAGAATGTTTAGAAGAAAAAAGAAAGCACCAAACAATTTACGTATCATTT
+ATAAAGAAATATTTTCATATAAAAAAGATGTTACTATAATTTTCTTTAGTATTTTAGTAGCTGGAGGATT
+ATATCCCGTATTTGCTTTATTATATGCTAGATATGTATCTACATTATTTGATTTTGCAAATCTAGAATAT
+AACTCAAATAAATATTCTATATATATTCTACTTATTGCTATTGCTATGTTCATTTCAGAAACACTCAAAA
+ACTATTATAACAACAAAATAGGAGAAAAAGTCGAAAAGACTATGAAACGTAGATTATTTGAAAATATATT
+ATATCAAGAAATGAGTTTCTTTGATCAAGATAAAAATACCCCAGGTGTTTTATCTGCACATATTAATAGA
+GATGTACATTTATTAAAAACGGGTTTAGTAAATAATATTGTTATTTTCTCTCATTTCATAATGCTCTTTC
+TGGTTAGCATGGTTATGTCCTTTTATTTTTGTCCAATTGTTGCAGCTGTATTAACTTTTATATATTTTAT
+TAATATGCGTGTATTTGCTGTAAGAGCTAGATTAACCAAAAGTAAAGAAATTGAGAAAAAAGAAAATATG
+TCAAGCGGAGTTTTTGCATTTAGTTCAGATGATGAAATGTTTAAAGATCCAAGTTTTTTAATACAGGAAG
+CATTTTATAATATGCATACTGTTATTAATTATGGTTTAGAAGATTATTTCTGTAATTTGATAGAAAAAGC
+TATTGATTATAAAAATAAAGGACAAAAAAGAAGAATTATTGTAAATGCAGCTTTATGGGGATTCAGTCAA
+AGCGCTCAATTATTTATTAATAGTTTTGCCTATTGGTTTGGATCCTTCTTAATTAAAAGAGGTACTATAT
+TAGTTGATGACTTTATGAAATCCTTATTTACTTTTATATTTACTGGTAGTTATGCTGGAAAATTAATGTC
+CTTAAAAGGAGATTCAGAAAATGCAAAATTATCATTTGAGAAATATTATCCATTAATGATTAGAAAATCA
+AATATTGATGTAAGAGATGATGGTGGAATAAGAATAAATAAAAATTTAATAAAAGGTAAAGTTGATATTA
+AAGATGTAAATTTCCGTTATATTTCAAGACCAAATGTACCTATTTATAAAAATTTATCTTTTACATGTGA
+TAGTAAAAAAACTACAGCAATCGTTGGAGAAACAGGTAGTGGAAAATCAACTTTTATGAATCTCTTATTA
+AGATTTTATGACTTGAAAAATGATCACATTATATTAAAAAATGATATGACAAATTTTCAAGATTATCAAA
+ATAATAATAATAATTCATTGGTTTTAAAAAATGTAAATGAATTTTCAAACCAATCTGGATCTGCAGAAGA
+TTATACTGTATTTAATAATAATGGAGAAATATTATTAGATGATATTAATATATGTGATTATAACTTAAGA
+GATCTTAGAAACTTATTTTCAATAGTTAGTCAAGAACCCATGTTATTTAATATGTCCATATATGAAAATA
+TCAAATTTGGAAGAGAAGATGCAACATTGGAAGATGTTAAACGTGTTAGTAAGTTTGCTGCTATAGATGA
+ATTTATCGAATCATTACCAAATAAATATGATACAAATGTTGGACCATATGGTAAAAGCTTATCAGGTGGA
+CAAAAACAGAGAATAGCTATAGCTAGAGCATTATTAAGAGAACCTAAAATATTATTATTAGATGAAGCAA
+CATCATCACTTGATTCCAATTCTGAGAAATTAATTGAAAAAACTATTGTAGATATTAAAGATAAAGCTGA
+CAAAACTATTATTACTATTGCCCACAGAATTGCATCTATAAAACGATCAGACAAAATTGTGGTATTTAAT
+AACCCTGATCGAAATGGAACCTTTGTACAGTCACATGGAACACACGATGAATTATTATCAGCACAAGATG
+GAATATATAAAAAATATGTAAAATTAGCTAAATGAAGCAAATCATAAATATATATATGTAATATATATAT
+ATATATGTATTTATATTTATGCATTTATATGATCCGCAAACATATAATATATGAACAGTATCAACTCTTG
+TCCGTTATATTGATATAATCCAGAAATTATATTCTCAATTTATTATTTTAAATATTTAAAGAATATATAT
+ATATATATATATATACATTTATTATAGTTTTAATGACATATTCCTAAATCTTTAAATATATGAATTTTAT
+TATACATAAATACTTACCTATTTTATATATATGTTGATTTATTATTTTTTTTTTTTTTTTCCTTCTTCCT
+TTTTTTTTTTATTTTTTATTTTTTTATGTATATATTGATTTTATTTTTCATAAGTATTTATATTATAAAG
+TTTACCAATTGTGTGATTATATAAAAAATATTTATTTTAATAATTTTGTAGTTACAACTTTTATTTAAAA
+TATATATATATATATATATATATATATATATATATATATTTATATATATATTTAATTATACAAATAGACC
+TTTATAAATATATAGGTATAATAAAATATGTATTTATTTGCAAACATTTGTTATTTTAATCTAAATGATA
+ATATATATGTATAGTATATATGGGAAAAAAAATTAAATAAATAATTAACATACATACATATACATATATG
+TATCACATGTAACATATTTTGATTTATAAAAATATAAAACAGTAATACAATTACACAAAAAAAAAAAAAA
+AAATAAATAAATAAAAAATAATAATATAATAAATAAAATAAATAAATAAATAAATAATAAGGAAAAGAAA
+TGATAATAATATATTTGCATATATAAATGTAGTAGGTATAAGAAATATATATGTTCATTATTATATAATT
+GTACATAATAATTATATCCAATATAAATGTGTTTAAAATAACTAAATATTTTGCTATATATAATTTTGTT
+T
+>XP_001351787.1 ABC transporter ATP-binding protein [Plasmodium falciparum 3D7]
+MGKEQKEKKDGNLSIKEEVEKELNKKSTAELFRKIKNEKISFFLPFKCLPAQHRKLLFISFVCAVLSGGT
+LPFFISVFGVILKNMNLGDDINPIILSLVSIGLVQFILSMISSYCMDVITSKILKTLKLEYLRSVFYQDG
+QFHDNNPGSKLRSDLDFYLEQVSSGIGTKFITIFTYASSFLGLYIWSLIKNARLTLCITCVFPLIYVCGV
+ICNKKVKLNKKTSLLYNNNTMSIIEEALMGIRTVASYCGEKTILNKFNLSETFYSKYILKANFVEALHIG
+LINGLILVSYAFGFWYGTRIIINSATNQYPNNDFNGASVISILLGVLISMFMLTIILPNITEYMKALEAT
+NSLYEIINRKPLVENNDDGETLPNIKKIEFKNVRFHYDTRKDVEIYKDLSFTLKEGKTYAFVGESGCGKS
+TILKLIERLYDPTEGDIIVNDSHNLKDINLKWWRSKIGVVSQDPLLFSNSIKNNIKYSLYSLKDLEAMEN
+YYEENTNDTYENKNFSLISNSMTSNELLEMKKEYQTIKDSDVVDVSKKVLIHDFVSSLPDKYDTLVGSNA
+SKLSGGQKQRISIARAIMRNPKILILDEATSSLDNKSEYLVQKTINNLKGNENRITIIIAHRLSTIRYAN
+TIFVLSNRERSDNNNNNNNDDNNNNNNNNNNKINNEGSYIIEQGTHDSLMKNKNGIYHLMINNQKISSNK
+SSNNGNDNGSDNKSSAYKDSDTGNDADNMNSLSIHENENISNNRNCKNTAENEKEEKVPFFKRMFRRKKK
+APNNLRIIYKEIFSYKKDVTIIFFSILVAGGLYPVFALLYARYVSTLFDFANLEYNSNKYSIYILLIAIA
+MFISETLKNYYNNKIGEKVEKTMKRRLFENILYQEMSFFDQDKNTPGVLSAHINRDVHLLKTGLVNNIVI
+FSHFIMLFLVSMVMSFYFCPIVAAVLTFIYFINMRVFAVRARLTKSKEIEKKENMSSGVFAFSSDDEMFK
+DPSFLIQEAFYNMHTVINYGLEDYFCNLIEKAIDYKNKGQKRRIIVNAALWGFSQSAQLFINSFAYWFGS
+FLIKRGTILVDDFMKSLFTFIFTGSYAGKLMSLKGDSENAKLSFEKYYPLMIRKSNIDVRDDGGIRINKN
+LIKGKVDIKDVNFRYISRPNVPIYKNLSFTCDSKKTTAIVGETGSGKSTFMNLLLRFYDLKNDHIILKND
+MTNFQDYQNNNNNSLVLKNVNEFSNQSGSAEDYTVFNNNGEILLDDINICDYNLRDLRNLFSIVSQEPML
+FNMSIYENIKFGREDATLEDVKRVSKFAAIDEFIESLPNKYDTNVGPYGKSLSGGQKQRIAIARALLREP
+KILLLDEATSSLDSNSEKLIEKTIVDIKDKADKTIITIAHRIASIKRSDKIVVFNNPDRNGTFVQSHGTH
+DELLSAQDGIYKKYVKLAK
+)"
+)
+```
+
+```{r}
+#| label: outlier-mutation-references
+# Bioconductor packages, called with their namespace so that they do not mask tidyverse functions
+for (package in c("Biostrings", "pwalign")) {
+  if (!requireNamespace(package, quietly = TRUE)) {
+    stop("Package ", package, " is needed: BiocManager::install(\"", package, "\")")
+  }
+}
+if (anyDuplicated(mutation.codons$gene)) stop("One codon per gene in mutation.codons")
+
+# Sequences of a FASTA text, named by their header
+read_fasta <- function(text, source) {
+  lines <- trimws(strsplit(text, "\n", fixed = TRUE)[[1]])
+  lines <- lines[nzchar(lines)]
+  header <- startsWith(lines, ">")
+  if (!length(lines) || !header[1]) stop(source, " is not in FASTA format (the first line must start with >)")
+  record <- factor(cumsum(header)[!header], levels = seq_len(sum(header)))
+  setNames(toupper(vapply(split(lines[!header], record), paste, character(1), collapse = "")),
+           sub("^>\\s*", "", lines[header]))
+}
+
+# 3D7 coding sequence of each gene: the part of the mRNA (from an ATG) that translates into the protein
+mutation.references <- pmap_dfr(mutation.codons, function(gene, codon) {
+  source <- paste0("reference.sequences$", gene)
+  if (is.null(reference.sequences[[gene]])) {
+    warning("No 3D7 sequences for ", gene, " in reference.sequences; it is not checked")
+    return(NULL)
+  }
+  sequences <- read_fasta(reference.sequences[[gene]], source)
+  nucleotide <- grepl("^[ACGTUN]+$", sequences)
+  if (sum(nucleotide) != 1L || sum(!nucleotide) != 1L) {
+    stop(source, " must have one nucleotide (mRNA or CDS) and one protein sequence")
+  }
+  mrna <- chartr("U", "T", sequences[[which(nucleotide)]])
+  protein <- sub("\\*$", "", sequences[[which(!nucleotide)]])
+  cds.length <- 3 * nchar(protein)
+  starts <- gregexpr("ATG", mrna, fixed = TRUE)[[1]]
+  cds <- NA_character_
+  for (start in starts[starts > 0 & starts + cds.length - 1 <= nchar(mrna)]) {
+    candidate <- substr(mrna, start, start + cds.length - 1)
+    if (as.character(Biostrings::translate(Biostrings::DNAString(candidate), if.fuzzy.codon = "X")) == protein) {
+      cds <- candidate
+      break
+    }
+  }
+  if (is.na(cds)) stop("The nucleotide sequence in ", source, " does not translate into its protein")
+  if (codon > nchar(protein)) stop(gene, " codon ", codon, " is beyond the end of the protein")
+  tibble(gene, codon, cds, protein, ref_codon = substr(cds, 3 * codon - 2, 3 * codon),
+         ref_aa = substr(protein, codon, codon))
+})
+if (!nrow(mutation.references)) {
+  mutation.references <- tibble(gene = character(), codon = numeric(), cds = character(), protein = character(),
+                                ref_codon = character(), ref_aa = character())
+}
+knitr::kable(transmute(mutation.references, Gene = gene, Codon = codon, `3D7 codon` = ref_codon,
+                       `3D7 amino acid` = ref_aa, `CDS (nt)` = nchar(cds), `Protein (aa)` = nchar(protein)),
+             caption = "Codons checked and their 3D7 reference")
+```
+
+```{r}
+#| label: outlier-point-mutations
+# ASVs of the CRT and MDR1 outlier samples in their selected run, with the same ID rules as the read depth
+mutation.samples <- outlier.rows %>%
+  filter(gene %in% mutation.references$gene) %>%
+  distinct(SampleID = .data[[fold.changes.id]], match_key, Run, gene)
+mutation.alleles <- map_dfr(files, function(file) {
+  d <- read_table(file)
+  id <- find_id_column(d, fold.changes.id.aliases, basename(file))
+  if (!"Run" %in% names(d)) d$Run <- basename(dirname(file))
+  amplicon <- intersect(c("target_name", "locus"), names(d))[1]
+  # The unmasked pseudo-CIGAR (newer mad4hatter tables) goes with the asv column; older tables only have pseudo_cigar
+  cigar <- intersect(c("pseudocigar_unmasked", "pseudo_cigar", "pseudocigar"), names(d))[1]
+  if (is.na(amplicon) || is.na(cigar) || !"asv" %in% names(d)) {
+    stop("No target_name/locus, asv or pseudo-CIGAR column in ", file)
+  }
+  d %>%
+    transmute(match_key = nida_key(sub("_L00\\d+$", "", sub("_S\\d+(_.*)?$", "", .data[[id]]))),
+              Run, amplicon = .data[[amplicon]], asv = toupper(asv), pseudo_cigar = .data[[cigar]],
+              reads = as.numeric(reads)) %>%
+    filter(reads > 0) %>%
+    semi_join(mutation.samples, by = c("match_key", "Run"))
+})
+
+# Amino acids of an ASV aligned to the coding sequence, for the codons inside the alignment.
+# A codon is NA when it has an insertion, a deletion or an N
+aligned_amino_acids <- function(aligned.asv, aligned.cds, cds.start) {
+  asv <- strsplit(aligned.asv, "")[[1]]
+  cds <- strsplit(aligned.cds, "")[[1]]
+  # Codon of each alignment column (an inserted base takes the codon of the previous base)
+  codon <- (cds.start - 2 + cumsum(cds != "-")) %/% 3 + 1
+  tibble(codon, asv, cds) %>%
+    group_by(codon) %>%
+    summarise(n = sum(cds != "-"), indel = any(asv == "-" | cds == "-"),
+              nt = paste(asv[cds != "-"], collapse = ""),
+              # Codon as in the ASV: deleted bases as -, inserted bases in lowercase
+              nt_asv = paste(if_else(cds == "-", tolower(asv), asv), collapse = ""), .groups = "drop") %>%
+    filter(n == 3) %>%
+    mutate(aa = if_else(indel, NA_character_, unname(Biostrings::GENETIC_CODE[nt])))
+}
+
+mutation.asvs <- map_dfr(seq_len(nrow(mutation.references)), function(i) {
+  reference <- mutation.references[i, ]
+  asvs <- mutation.alleles %>%
+    semi_join(filter(mutation.samples, gene == reference$gene), by = c("match_key", "Run")) %>%
+    distinct(asv) %>%
+    pull(asv)
+  # Only the ASVs sharing a 20-base word with the coding sequence are aligned
+  words <- substring(reference$cds, 1:(nchar(reference$cds) - 19), 20:nchar(reference$cds))
+  asvs <- asvs[map_lgl(asvs, ~ nchar(.x) >= 20 && any(substring(.x, 1:(nchar(.x) - 19), 20:nchar(.x)) %in% words))]
+  if (!length(asvs)) return(NULL)
+  alignment <- pwalign::pairwiseAlignment(
+    Biostrings::DNAStringSet(asvs), Biostrings::DNAString(reference$cds), type = "local",
+    substitutionMatrix = pwalign::nucleotideSubstitutionMatrix(match = 2, mismatch = -3),
+    gapOpening = 5, gapExtension = 2)
+  tibble(gene = reference$gene, asv = asvs,
+         aligned_asv = as.character(pwalign::alignedPattern(alignment)),
+         aligned_cds = as.character(pwalign::alignedSubject(alignment)),
+         cds_start = BiocGenerics::start(pwalign::subject(alignment)),
+         cds_end = BiocGenerics::end(pwalign::subject(alignment))) %>%
+    mutate(identity = map2_dbl(aligned_asv, aligned_cds, ~ mean(strsplit(.x, "")[[1]] == strsplit(.y, "")[[1]]))) %>%
+    # ASVs whose alignment covers the codon, over at least 50 bases with at least 90% identity
+    filter(cds_start <= 3 * reference$codon - 2, cds_end >= 3 * reference$codon,
+           nchar(aligned_cds) >= 50, identity >= 0.9) %>%
+    mutate(amino_acids = pmap(list(aligned_asv, aligned_cds, cds_start), aligned_amino_acids),
+           Codons = map_chr(amino_acids, ~ paste0(min(.x$codon), "-", max(.x$codon))),
+           PseudoCigarAA = map_chr(amino_acids, function(codons) {
+             changes <- codons %>%
+               mutate(ref = substring(reference$protein, codon, codon)) %>%
+               filter(is.na(aa) | aa != ref)
+             if (nrow(changes)) paste0(changes$ref, changes$codon, replace_na(changes$aa, "?"), collapse = " ") else "."
+           }),
+           CodonAA = map_chr(amino_acids, function(codons) {
+             aa <- codons$aa[codons$codon == reference$codon]
+             paste0(reference$ref_aa, reference$codon, if (is.na(aa)) "?" else if (aa == reference$ref_aa) "" else aa)
+           }),
+           # Alt (sample) / Ref (3D7) amino acid and codon at the codon checked, the reference amino acid with its
+           # position (e.g. Y/H97 and TAC/CAC for CRT H97Y)
+           CodonAA_AltRef = map_chr(amino_acids, function(codons) {
+             paste0(replace_na(codons$aa[codons$codon == reference$codon], "?"), "/", reference$ref_aa, reference$codon)
+           }),
+           CodonNuc_AltRef = map_chr(amino_acids, function(codons) {
+             paste0(codons$nt_asv[codons$codon == reference$codon], "/", reference$ref_codon)
+           }))
+})
+if (!nrow(mutation.asvs)) {
+  mutation.asvs <- tibble(gene = character(), asv = character(), Codons = character(), PseudoCigarAA = character(),
+                          CodonAA = character(), CodonAA_AltRef = character(), CodonNuc_AltRef = character())
+}
+
+# One row per sample ASV covering the codon; ASVs with the same pseudo-CIGAR and amino acids are added together
+mutation.per.asv <- mutation.alleles %>%
+  inner_join(mutation.samples, by = c("match_key", "Run"), relationship = "many-to-many") %>%
+  inner_join(select(mutation.asvs, gene, asv, Codons, PseudoCigarAA, CodonAA, CodonAA_AltRef, CodonNuc_AltRef),
+             by = c("gene", "asv")) %>%
+  group_by(SampleID, match_key, Run, gene, amplicon, Codons, pseudo_cigar, PseudoCigarAA, CodonAA,
+           CodonAA_AltRef, CodonNuc_AltRef) %>%
+  summarise(reads = sum(reads), .groups = "drop") %>%
+  arrange(gene, SampleID, Run, amplicon, desc(reads))
+# Columns of CNV_Outlier_Summary.txt: the ASVs of a sample separated by "; ", ordered by reads
+mutation.per.sample <- mutation.per.asv %>%
+  group_by(match_key, Run, gene) %>%
+  summarise(CodonAA_AltRef = paste(CodonAA_AltRef, collapse = "; "),
+            CodonNuc_AltRef = paste(CodonNuc_AltRef, collapse = "; "),
+            .groups = "drop")
+outlier.rows <- outlier.rows %>%
+  select(-any_of(c("CodonAA_AltRef", "CodonNuc_AltRef"))) %>%
+  left_join(mutation.per.sample, by = c("match_key", "Run", "gene"))
+
+mutation.rows <- filter(outlier.rows, gene %in% mutation.references$gene)
+# CodonAA is e.g. H97 (as 3D7), H97Y (change) or H97? (not read)
+mutation.changed <- filter(mutation.per.asv, grepl("\\d[A-Z*]$", CodonAA))
+mutation.unread <- filter(mutation.per.asv, endsWith(CodonAA, "?"))
+cat(nrow(mutation.rows), "CRT and MDR1 rows:", sum(!is.na(mutation.rows$CodonAA_AltRef)), "with ASVs covering the codon,",
+    nrow(distinct(mutation.changed, match_key, Run, gene)), "with a change at the codon (e.g. Y/H97),",
+    nrow(distinct(mutation.unread, match_key, Run, gene)), "with the codon not read (?)\n")
+knitr::kable(transmute(mutation.per.asv, SampleID, Run, Gene = gene, Amplicon = amplicon, Codons, Reads = reads,
+                       PseudoCigarNuc = pseudo_cigar, PseudoCigarAA, CodonAA,
+                       `CodonAA_Alt/Ref` = CodonAA_AltRef, `CodonNuc_Alt/Ref` = CodonNuc_AltRef),
+             caption = "ASVs of the CRT and MDR1 outlier samples covering the codon, aligned to the 3D7 coding sequence")
+```
+
+CNV threshold summary with the point mutations, saved as `CNV_Outlier_Summary.txt`
+
+```{r}
+#| label: cnv-outlier-summary-table
 outlier.summary <- outlier.rows %>%
-  transmute(SampleID = .data[[fold.changes.id]],
-            FoldChange = FoldChangeGene, Gene = gene,
-            GeneReads = total_gene_reads, SampleTotalReads = total_reads,
-            Parasitemia = parasitemia, Type)
+  select(SampleID = all_of(fold.changes.id),
+         FoldChange = FoldChangeGene, Gene = gene,
+         GeneReads = total_gene_reads, GeneReadCoverage = mean_locus_depth,
+         SampleTotalReads = total_reads, Parasitemia = parasitemia, Type,
+         `CodonAA_Alt/Ref` = CodonAA_AltRef, `CodonNuc_Alt/Ref` = CodonNuc_AltRef)
 # Append original metadata columns except duplicate parasitemia fields.
 # Read the source as text to preserve IDs and metadata values exactly.
 # The leading Parasitemia column retains the clinical values/QC used in analysis.
@@ -855,10 +1308,93 @@ for (column in names(outlier.metadata)) {
   outlier.summary[[output.column]] <- outlier.metadata[[column]][outlier.metadata.index]
 }
 
-knitr::kable(outlier.summary, digits = c(0, 3, 0, 0, 0, 2, 0, rep(0, ncol(outlier.summary) - 7)),
+outlier.digits <- case_when(names(outlier.summary) == "FoldChange" ~ 3,
+                            names(outlier.summary) == "Parasitemia" ~ 2,
+                            grepl("ReadCoverage$", names(outlier.summary)) ~ 1,
+                            TRUE ~ 0)
+knitr::kable(outlier.summary, digits = outlier.digits,
              caption = "Samples meeting the gene-specific deletion or duplication thresholds")
 # Export full precision; rounding above is for display only.
 readr::write_tsv(outlier.summary, outlier.summary.path, na = "NA")
-cat(nrow(outlier.summary), "sample-gene calls across",
-    n_distinct(outlier.summary$SampleID), "samples. Saved:", outlier.summary.path, "\n")
+cat("Saved:", outlier.summary.path, "\n")
+```
+
+
+GAM fit of the samples in the CNV threshold summary
+
+One page per sample and Run of `CNV_Outlier_Summary.txt`, as the plots of the controls in estCNV.qmd
+Points are the reads of each validated locus used for the fold change (after the SuperBatch correction), colored by target group
+The black line is the GAM fit of estCNV.qmd (reads ~ s(amplicon length) + pool + target groups, Poisson) with the
+target groups set to 0
+
+```{r}
+gam.plots.enabled <- file.exists(target.counts.path)
+if (!gam.plots.enabled) cat("GAM plots skipped:", target.counts.path, "not found (it is written by estCNV.qmd)\n")
+```
+
+```{r}
+#| label: cnv-outlier-gam-plots
+#| eval: !expr gam.plots.enabled
+gam.plots.pdf.path <- file.path(output.dir, "CNV_Outlier_GAM_Plots.pdf")
+target.counts <- read_table(target.counts.path) %>%
+  mutate(across(c(amplicon_length, reads), as.numeric))
+missing.columns <- setdiff(c("sample_name", "Run", "Batch", "SuperBatch", "target_name", "pool", "amplicon_length",
+                             "group", "reads"), names(target.counts))
+if (length(missing.columns)) {
+  stop(basename(target.counts.path), " is missing columns: ", paste(missing.columns, collapse = ", "))
+}
+if (length(setdiff(target.counts$group, names(group.colors)))) {
+  stop("Add a color in group.colors for: ", paste(setdiff(target.counts$group, names(group.colors)), collapse = ", "))
+}
+
+# One page per sample and Run of the summary, with its threshold call(s) on the gene fold changes
+gam.samples <- outlier.genes %>%
+  group_by(sample_name = .data[[fold.changes.id]], Run) %>%
+  summarise(calls = paste0(gene, " ", tolower(Type), " (fold change ", round(FoldChangeGene, 2), ")", collapse = "; "),
+            .groups = "drop") %>%
+  arrange(sample_name, Run)
+not.found <- anti_join(gam.samples, target.counts, by = c("sample_name", "Run"))
+if (nrow(not.found)) {
+  warning("Not in ", basename(target.counts.path), " (no plot): ", paste(not.found$sample_name, not.found$Run, collapse = ", "))
+}
+gam.samples <- semi_join(gam.samples, target.counts, by = c("sample_name", "Run"))
+
+# Same model as estCNV() in estCNV.qmd: Poisson GAM with a smooth of amplicon length (k = 3), the pool
+# and one 0/1 column per target group, whose coefficient gives the fold change of the group
+gam.groups <- setdiff(sort(unique(target.counts$group)), "NONE")
+gam.formula <- as.formula(paste("reads ~ s(amplicon_length, k = 3) + Pool.factor +", paste(gam.groups, collapse = " + ")))
+
+plot_gam_fit <- function(sample.name, run, calls) {
+  data <- target.counts %>%
+    filter(sample_name == sample.name, Run == run) %>%
+    mutate(Pool.factor = as.factor(pool))
+  for (g in gam.groups) data[[g]] <- as.numeric(data$group == g)
+  fit <- gam(gam.formula, data = data, family = "poisson")
+  # Reads expected without a CNV (target groups set to 0), per pool
+  pred.frame <- expand_grid(amplicon_length = seq(floor(min(data$amplicon_length)), ceiling(max(data$amplicon_length))),
+                            Pool.factor = unique(data$Pool.factor))
+  for (g in gam.groups) pred.frame[[g]] <- 0
+  pred.frame$Reads <- predict(fit, pred.frame, type = "response")
+  group.fold.changes <- exp(summary(fit)$p.coeff[gam.groups])
+
+  ggplot(data, aes(x = amplicon_length, y = reads, color = group)) +
+    # Target groups drawn on top of the other loci
+    geom_point(data = filter(data, group == "NONE"), alpha = 0.7) +
+    geom_point(data = filter(data, group != "NONE"), size = 2) +
+    geom_line(data = pred.frame, aes(x = amplicon_length, y = Reads), color = "black", inherit.aes = FALSE) +
+    facet_wrap(~Pool.factor) +
+    scale_color_manual(values = group.colors, name = "Target group") +
+    labs(x = "Amplicon length", y = "Reads (after SuperBatch correction)",
+         title = paste("Sample:", sample.name, "| Run:", run, "| Batch:", data$Batch[1], "| SuperBatch:", data$SuperBatch[1]),
+         subtitle = paste0(calls, "\nFold change per target group (this fit): ",
+                           paste(names(group.fold.changes), round(group.fold.changes, 2), collapse = ", "))) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+}
+
+gam.plots <- pmap(gam.samples, function(sample_name, Run, calls) plot_gam_fit(sample_name, Run, calls))
+pdf(gam.plots.pdf.path, width = 11, height = 8.5)
+walk(gam.plots, print)
+invisible(dev.off())
+cat(length(gam.plots), "sample-runs plotted, one per page. Saved:", gam.plots.pdf.path, "\n")
 ```
